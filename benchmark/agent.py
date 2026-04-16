@@ -3,7 +3,7 @@
 import asyncio
 import json
 import logging
-import subprocess
+import types
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -135,29 +135,72 @@ async def run_agent(
             token_state["api_calls"] += 1
             logger.info("API call #%d to %s", token_state["api_calls"], litellm_model)
 
-            response = await litellm.acompletion(
+            # Stream the response so the user can see tokens as they arrive
+            stream = await litellm.acompletion(
                 model=litellm_model,
                 messages=messages,
                 tools=TOOLS,
                 tool_choice="auto",
+                stream=True,
                 **extra_kwargs,
             )
 
-            if response.usage:
-                token_state["tokens_in"] += response.usage.prompt_tokens or 0
-                token_state["tokens_out"] += response.usage.completion_tokens or 0
+            full_content = ""
+            tool_call_chunks: dict[int, dict] = {}  # index → {id, name, args}
+            finish_reason = None
 
-            choice = response.choices[0]
-            msg = choice.message
+            print(f"\n[{litellm_model}] ", end="", flush=True)
+            async for chunk in stream:
+                c = chunk.choices[0]
+                delta = c.delta
+
+                if delta.content:
+                    print(delta.content, end="", flush=True)
+                    full_content += delta.content
+
+                for tc_chunk in delta.tool_calls or []:
+                    idx = tc_chunk.index
+                    if idx not in tool_call_chunks:
+                        tool_call_chunks[idx] = {"id": "", "name": "", "args": ""}
+                    entry = tool_call_chunks[idx]
+                    if tc_chunk.id:
+                        entry["id"] += tc_chunk.id
+                    if tc_chunk.function:
+                        if tc_chunk.function.name:
+                            entry["name"] += tc_chunk.function.name
+                        if tc_chunk.function.arguments:
+                            entry["args"] += tc_chunk.function.arguments
+
+                if c.finish_reason:
+                    finish_reason = c.finish_reason
+
+                if hasattr(chunk, "usage") and chunk.usage:
+                    token_state["tokens_in"] += chunk.usage.prompt_tokens or 0
+                    token_state["tokens_out"] += chunk.usage.completion_tokens or 0
+
+            print()  # newline after streamed content
+
+            # Reconstruct tool_calls from chunks
+            tool_calls = [
+                types.SimpleNamespace(
+                    id=v["id"],
+                    function=types.SimpleNamespace(name=v["name"], arguments=v["args"]),
+                )
+                for v in tool_call_chunks.values()
+            ] if tool_call_chunks else []
 
             append_trace({
                 "type": "assistant",
-                "content": msg.content,
+                "content": full_content,
                 "tool_calls": [
                     {"id": tc.id, "name": tc.function.name, "args": tc.function.arguments}
-                    for tc in (msg.tool_calls or [])
+                    for tc in tool_calls
                 ],
             })
+
+            # Fake message/choice objects for the rest of the loop
+            msg = types.SimpleNamespace(content=full_content, tool_calls=tool_calls or None)
+            choice = types.SimpleNamespace(finish_reason=finish_reason, message=msg)
 
             # LiteLLM message objects need to be converted for re-use in messages list
             msg_dict: dict = {"role": "assistant"}
@@ -224,9 +267,10 @@ async def run_agent(
                     continue
 
                 command = fn_args.get("command", "")
-                logger.info("tool[%d] bash: %s", token_state["tool_calls"], command[:100])
+                print(f"\n$ {command}", flush=True)
                 output = await _run_bash(command, workspace)
-                logger.debug("tool output: %s", output[:200])
+                print(output[:1000] if output else "(no output)", flush=True)
+                logger.info("tool[%d] bash done", token_state["tool_calls"])
 
                 append_trace({
                     "type": "tool_result",
