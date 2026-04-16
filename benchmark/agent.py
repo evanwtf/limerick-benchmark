@@ -130,6 +130,7 @@ async def run_agent(
     append_trace({"type": "task", "content": task_prompt})
 
     async def _loop() -> None:
+        nonlocal nudge_count, invalid_tool_count
         while True:
             token_state["api_calls"] += 1
             logger.info("API call #%d to %s", token_state["api_calls"], litellm_model)
