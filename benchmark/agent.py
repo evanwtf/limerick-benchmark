@@ -170,6 +170,20 @@ async def run_agent(
             messages.append(msg_dict)
 
             if not msg.tool_calls:
+                # Model returned without using tools. If the workspace is still
+                # empty this is a non-starter — push it once, then give up.
+                workspace_has_files = any(workspace.rglob("*"))
+                if not workspace_has_files and token_state["tool_calls"] == 0:
+                    logger.warning("Model returned without using tools and workspace is empty — nudging")
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "You haven't created any files yet. "
+                            "Use the bash tool RIGHT NOW to start building the application. "
+                            "Begin with: uv init . && uv add flask"
+                        ),
+                    })
+                    continue
                 stats["finish_reason"] = choice.finish_reason
                 logger.info("Agent finished: %s", choice.finish_reason)
                 break
@@ -178,9 +192,27 @@ async def run_agent(
             tool_results: list[dict] = []
             for tc in msg.tool_calls:
                 token_state["tool_calls"] += 1
+                fn_name = tc.function.name.strip()
                 fn_args = json.loads(tc.function.arguments)
-                command = fn_args.get("command", "")
 
+                if fn_name != "bash":
+                    # Model called a nonexistent tool — tell it what's available
+                    logger.warning("Model called unknown tool '%s' — returning error", fn_name)
+                    output = f"Error: unknown tool '{fn_name}'. The only available tool is 'bash'. Use bash to run shell commands."
+                    append_trace({
+                        "type": "tool_result",
+                        "call_id": tc.id,
+                        "command": f"[invalid tool: {fn_name}]",
+                        "output": output,
+                    })
+                    tool_results.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": output,
+                    })
+                    continue
+
+                command = fn_args.get("command", "")
                 logger.info("tool[%d] bash: %s", token_state["tool_calls"], command[:100])
                 output = await _run_bash(command, workspace)
                 logger.debug("tool output: %s", output[:200])
