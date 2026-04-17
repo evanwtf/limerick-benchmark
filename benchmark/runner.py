@@ -49,7 +49,7 @@ def _load_task(task_name: str) -> str:
     return path.read_text()
 
 
-def _prepare_workspace(workspace: Path) -> None:
+def _prepare_workspace(workspace: Path, task_name: str | None = None) -> None:
     """Initialize the workspace as a uv project with Flask preinstalled."""
     pyproject = workspace / "pyproject.toml"
     if not pyproject.exists():
@@ -62,6 +62,15 @@ def _prepare_workspace(workspace: Path) -> None:
             text=True,
         )
 
+    # Drop the stock `main.py` uv produces so models can't accidentally
+    # leave it as the entry point.
+    main_py = workspace / "main.py"
+    if main_py.exists():
+        main_py.unlink()
+
+    if task_name:
+        _seed_task_resources(workspace, task_name)
+
     if _workspace_has_dependency(workspace, "flask"):
         return
 
@@ -73,6 +82,14 @@ def _prepare_workspace(workspace: Path) -> None:
         env=sanitized_subprocess_env(),
         text=True,
     )
+
+
+def _seed_task_resources(workspace: Path, task_name: str) -> None:
+    """Copy any task-specific data files into the workspace."""
+    if task_name == "limerick":
+        src = TASKS_DIR / "limericks.txt"
+        if src.exists():
+            (workspace / "limericks.txt").write_bytes(src.read_bytes())
 
 
 def _workspace_has_dependency(workspace: Path, dependency_name: str) -> bool:
@@ -97,16 +114,24 @@ def _workspace_has_dependency(workspace: Path, dependency_name: str) -> bool:
     return False
 
 
-def _task_prompt_with_workspace_note(task_prompt: str) -> str:
+def _task_prompt_with_workspace_note(task_prompt: str, *, task_name: str | None = None) -> str:
     """Add a stable environment note that the workspace is already prepared."""
-    return (
-        "Environment note:\n"
-        "- The current directory is already initialized as a uv project with Python 3.12.\n"
-        "- Do not run `uv init` again.\n"
-        "- Flask is already installed. Do not run `uv add flask`.\n"
-        "- Just create the application files and ensure the server starts on port 8181.\n\n"
-        f"{task_prompt}"
+    notes = [
+        "- The current directory is already initialized as a uv project with Python 3.12.",
+        "- Do not run `uv init` again.",
+        "- Flask is already installed. Do not run `uv add flask`.",
+        "- There is NO `main.py` in this workspace. Create `app.py` as the entry point.",
+    ]
+    if task_name == "limerick":
+        notes.append(
+            "- A file `limericks.txt` with 20 pre-written limericks is already in "
+            "this directory. Read from it instead of generating limericks in your reply."
+        )
+    notes.append(
+        "- Write code and run shell commands. Do NOT output limericks, poems, or long literal "
+        "data in your chat replies — put data in files."
     )
+    return "Environment note:\n" + "\n".join(notes) + "\n\n" + task_prompt
 
 
 def _classify_failure(summary: dict[str, Any]) -> str:
@@ -150,6 +175,7 @@ async def _run_one(
     job_id: str,
     agent_type: str = "react",
     run_label: str = "aider",
+    task_name: str | None = None,
 ) -> dict[str, Any]:
     """Run the full benchmark pipeline for a single model."""
     model_id: str = model["id"]
@@ -165,7 +191,7 @@ async def _run_one(
     # Nested under the job id so per-job cleanup is one `rm -rf`.
     workspace = WORKSPACE_BASE / job_id / _slug(model_id)
     workspace.mkdir(parents=True)
-    _prepare_workspace(workspace)
+    _prepare_workspace(workspace, task_name=task_name)
 
     # Symlink for convenience so results dir is self-contained for browsing
     (run_dir / "workspace").symlink_to(workspace)
@@ -195,7 +221,7 @@ async def _run_one(
     agent_stats = await run_agent(
         model_id=model_id,
         provider=provider,
-        task_prompt=_task_prompt_with_workspace_note(task_prompt),
+        task_prompt=_task_prompt_with_workspace_note(task_prompt, task_name=task_name),
         workspace=workspace,
         trace_path=run_dir / "trace.jsonl",
         token_state=token_state,
@@ -320,6 +346,7 @@ async def run_benchmark(
             job_id=job_id,
             agent_type=agent_type,
             run_label=run_label,
+            task_name=task_name,
         )
         summaries.append(summary)
 
