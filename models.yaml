@@ -20,14 +20,14 @@ reference:
     provider: anthropic
     size_gb: null
     context_k: 200
-    recommended: true
+    recommended: false
     notes: "100-point reference. Scores for all other models are relative to this."
 
   - id: claude-sonnet-4-6
     provider: anthropic
     size_gb: null
     context_k: 200
-    recommended: true
+    recommended: false
     v1: true
     notes: "v1 reference model."
 
@@ -35,7 +35,7 @@ reference:
     provider: anthropic
     size_gb: null
     context_k: 200
-    recommended: true
+    recommended: false
     notes: "Lower-cost reference baseline."
 
 # ---------------------------------------------------------------------------

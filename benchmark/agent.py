@@ -335,6 +335,9 @@ async def _run_aider(
 
         # Aider doesn't give us token counts easily via CLI.
         # We just capture the log.
+        repeat_detector: list[str] = []
+        MAX_REPEAT_LINES = 20
+
         async def read_output():
             while True:
                 line = await proc.stdout.readline()
@@ -345,6 +348,18 @@ async def _run_aider(
                     print(f"[aider] {text}", flush=True)
                     append_trace({"type": "aider_log", "content": text})
 
+                    # Simple loop detection: if the same line repeats too much
+                    repeat_detector.append(text)
+                    if len(repeat_detector) > MAX_REPEAT_LINES:
+                        repeat_detector.pop(0)
+
+                        # Check for 1-line or 2-line loops
+                        if len(set(repeat_detector)) < 3: # Mostly the same 1 or 2 lines
+                            stats["error"] = "Detected infinite loop in model output"
+                            stats["finish_reason"] = "stuck_loop"
+                            logger.error("Aborting aider: detected infinite loop in log output")
+                            await terminate_process_groups({pgid})
+                            return
         try:
             await asyncio.wait_for(read_output(), timeout=timeout)
             await proc.wait()
