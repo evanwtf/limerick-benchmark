@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +42,31 @@ def _load_task(task_name: str) -> str:
     return path.read_text()
 
 
+def _prepare_workspace(workspace: Path) -> None:
+    """Initialize the workspace as a uv project before handing it to the model."""
+    if (workspace / "pyproject.toml").exists():
+        return
+
+    subprocess.run(
+        ["uv", "init", ".", "--name", workspace.name.replace("_", "-")],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _task_prompt_with_workspace_note(task_prompt: str) -> str:
+    """Add a stable environment note that the workspace is already initialized."""
+    return (
+        "Environment note:\n"
+        "- The current directory is already initialized as a uv project.\n"
+        "- Do not run `uv init`.\n"
+        "- Use `uv add ...`, create the application files, and start the server with `uv run ...`.\n\n"
+        f"{task_prompt}"
+    )
+
+
 def _should_evaluate(agent_stats: dict[str, Any]) -> bool:
     """Return True when post-run evaluation can still produce meaningful data."""
     finish_reason = agent_stats.get("finish_reason")
@@ -70,6 +96,7 @@ async def _run_one(
     # pyproject.toml as a parent workspace when the model runs `uv init`.
     workspace = WORKSPACE_BASE / run_dir.name
     workspace.mkdir(parents=True)
+    _prepare_workspace(workspace)
 
     # Symlink for convenience so results dir is self-contained for browsing
     (run_dir / "workspace").symlink_to(workspace)
@@ -98,7 +125,7 @@ async def _run_one(
     agent_stats = await run_agent(
         model_id=model_id,
         provider=provider,
-        task_prompt=task_prompt,
+        task_prompt=_task_prompt_with_workspace_note(task_prompt),
         workspace=workspace,
         trace_path=run_dir / "trace.jsonl",
         token_state=token_state,

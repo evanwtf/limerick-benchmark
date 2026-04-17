@@ -33,6 +33,7 @@ Do NOT call any other tool name — only "bash" exists.
 
 Rules:
 - Work in the current directory only.
+- The workspace is already initialized as a uv project. Do NOT run `uv init`.
 - Use `uv` for all Python package management.
 - Test that your work actually runs before declaring done.
 - When the task is complete and working, stop and summarize what you built.
