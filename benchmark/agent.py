@@ -417,6 +417,7 @@ async def _run_aider(
         "finish_reason": "completed",
         "timed_out": False,
         "error": None,
+        "agent_stop": None,
     }
 
     trace: list[dict] = []
@@ -451,12 +452,14 @@ async def _run_aider(
         normalized_lines: list[str] = []
         edit_counts: dict[str, int] = {}
         abort_reason: str | None = None
+        abort_category: str | None = None
 
-        def trip(reason: str) -> None:
-            nonlocal abort_reason
+        def trip(category: str, reason: str) -> None:
+            nonlocal abort_reason, abort_category
             if abort_reason is None:
                 abort_reason = reason
-                logger.error("Aborting aider: %s", reason)
+                abort_category = category
+                logger.error("Aborting aider [%s]: %s", category, reason)
 
         async def read_output() -> None:
             while True:
@@ -479,12 +482,13 @@ async def _run_aider(
 
                 if _aider_low_uniqueness(normalized_lines):
                     trip(
-                        f"low log uniqueness: <{AIDER_UNIQUE_THRESHOLD} unique normalized "
-                        f"lines in last {AIDER_REPEAT_WINDOW}"
+                        "low_log_uniqueness",
+                        f"<{AIDER_UNIQUE_THRESHOLD} unique normalized "
+                        f"lines in last {AIDER_REPEAT_WINDOW}",
                     )
                     break
                 if _aider_has_repeating_cycle(normalized_lines):
-                    trip("repeating log cycle detected")
+                    trip("repeating_log_cycle", "repeating log cycle detected")
                     break
 
                 edited = _extract_aider_edit_target(text)
@@ -492,8 +496,9 @@ async def _run_aider(
                     edit_counts[edited] = edit_counts.get(edited, 0) + 1
                     if edit_counts[edited] > AIDER_MAX_EDITS_PER_FILE:
                         trip(
+                            "file_edit_cap",
                             f"file {edited!r} edited {edit_counts[edited]} times "
-                            f"(> {AIDER_MAX_EDITS_PER_FILE})"
+                            f"(> {AIDER_MAX_EDITS_PER_FILE})",
                         )
                         break
 
@@ -512,7 +517,10 @@ async def _run_aider(
                     continue
                 idle = now - last_change
                 if idle > aider_stagnation_timeout:
-                    trip(f"workspace unchanged for {int(idle)}s")
+                    trip(
+                        "workspace_stagnation",
+                        f"workspace unchanged for {int(idle)}s",
+                    )
                     return
 
         reader = asyncio.create_task(read_output())
@@ -535,6 +543,7 @@ async def _run_aider(
         except asyncio.TimeoutError:
             stats["timed_out"] = True
             stats["finish_reason"] = "timeout"
+            stats["agent_stop"] = {"category": "timeout", "detail": f"no completion within {timeout}s"}
             logger.warning("Aider timed out after %ds", timeout)
             for task in (reader, watcher):
                 task.cancel()
@@ -542,6 +551,7 @@ async def _run_aider(
         if abort_reason is not None:
             stats["error"] = f"Detected infinite loop: {abort_reason}"
             stats["finish_reason"] = "stuck_loop"
+            stats["agent_stop"] = {"category": abort_category, "detail": abort_reason}
 
         if proc.returncode is None:
             await terminate_process_groups({pgid})
@@ -558,10 +568,15 @@ async def _run_aider(
         ):
             stats["error"] = f"aider exited with code {proc.returncode}"
             stats["finish_reason"] = "error"
+            stats["agent_stop"] = {
+                "category": "nonzero_exit",
+                "detail": f"aider exited with code {proc.returncode}",
+            }
 
     except Exception as exc:
         stats["error"] = str(exc)
         stats["finish_reason"] = "error"
+        stats["agent_stop"] = {"category": "agent_exception", "detail": str(exc)}
         logger.error("Aider error: %s", exc, exc_info=True)
         if pgid:
             await terminate_process_groups({pgid})
@@ -641,6 +656,7 @@ async def _run_react(
         "finish_reason": None,
         "timed_out": False,
         "error": None,
+        "agent_stop": None,
     }
     nudge_count = 0
     MAX_NUDGES = 2
@@ -848,6 +864,10 @@ async def _run_react(
                     if invalid_tool_count >= MAX_INVALID_TOOLS:
                         logger.error("Too many invalid tool calls — aborting agent")
                         stats["finish_reason"] = "invalid_tool_loop"
+                        stats["agent_stop"] = {
+                            "category": "invalid_tool_loop",
+                            "detail": f"{invalid_tool_count} invalid tool calls; last: {exc}",
+                        }
                         return
                     output = f"Error: invalid tool arguments. {exc}. Use the bash tool with JSON like {{\"command\": \"pwd\"}}."
                     append_trace({
@@ -870,6 +890,10 @@ async def _run_react(
                     if invalid_tool_count >= MAX_INVALID_TOOLS:
                         logger.error("Too many invalid tool calls — aborting agent")
                         stats["finish_reason"] = "invalid_tool_loop"
+                        stats["agent_stop"] = {
+                            "category": "invalid_tool_loop",
+                            "detail": f"{invalid_tool_count} calls to unknown tools; last: {fn_name!r}",
+                        }
                         return
                     output = f"Error: unknown tool '{fn_name}'. The only available tool is 'bash'. Use bash to run shell commands."
                     append_trace({
@@ -893,6 +917,10 @@ async def _run_react(
                     if invalid_tool_count >= MAX_INVALID_TOOLS:
                         logger.error("Too many invalid tool calls — aborting agent")
                         stats["finish_reason"] = "invalid_tool_loop"
+                        stats["agent_stop"] = {
+                            "category": "invalid_tool_loop",
+                            "detail": f"{invalid_tool_count} invalid tool calls; last: missing command arg",
+                        }
                         return
                     output = "Error: bash tool requires a non-empty string 'command' argument."
                     append_trace({
@@ -942,6 +970,10 @@ async def _run_react(
                     logger.error("Aborting run after %d consecutive redundant uv init attempts",
                                  redundant_uv_init_streak)
                     stats["finish_reason"] = "redundant_uv_init_loop"
+                    stats["agent_stop"] = {
+                        "category": "redundant_uv_init_loop",
+                        "detail": f"{redundant_uv_init_streak} consecutive redundant `uv init` attempts",
+                    }
                     return
                 if repeated_command_streak > MAX_REPEATED_COMMAND_STREAK:
                     output = (
@@ -957,6 +989,10 @@ async def _run_react(
                     logger.error("Aborting run after %d consecutive identical commands: %s",
                                  repeated_command_streak, command_signature)
                     stats["finish_reason"] = "repeated_command_loop"
+                    stats["agent_stop"] = {
+                        "category": "repeated_command_loop",
+                        "detail": f"{repeated_command_streak}x `{command_signature[:120]}`",
+                    }
                     return
                 if repeated_file_write_streak > MAX_REPEATED_FILE_WRITE_STREAK:
                     output = (
@@ -975,6 +1011,10 @@ async def _run_react(
                         written_file,
                     )
                     stats["finish_reason"] = "repeated_file_write_loop"
+                    stats["agent_stop"] = {
+                        "category": "repeated_file_write_loop",
+                        "detail": f"{repeated_file_write_streak}x overwrite of `{written_file}`",
+                    }
                     return
                 print(f"$ {command}", flush=True)
                 output = await _run_bash(command, workspace, active_process_groups)
@@ -1001,10 +1041,12 @@ async def _run_react(
     except asyncio.TimeoutError:
         stats["timed_out"] = True
         stats["finish_reason"] = "timeout"
+        stats["agent_stop"] = {"category": "timeout", "detail": f"no completion within {timeout}s"}
         logger.warning("Agent timed out after %ds", timeout)
     except Exception as exc:
         stats["error"] = str(exc)
         stats["finish_reason"] = f"error"
+        stats["agent_stop"] = {"category": "agent_exception", "detail": str(exc)}
         logger.error("Agent error: %s", exc, exc_info=True)
     finally:
         await terminate_process_groups(active_process_groups)

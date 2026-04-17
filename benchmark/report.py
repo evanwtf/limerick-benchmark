@@ -273,43 +273,54 @@ def _bucket_failures(fails: list[ModelReport]) -> Counter:
 
 
 def _failure_bucket(summary: dict[str, Any]) -> str:
+    category = summary.get("failure_category")
+    if category:
+        return str(category)
+    agent_stop = summary.get("agent_stop") or {}
+    if agent_stop.get("category"):
+        return str(agent_stop["category"])
     if summary.get("timed_out"):
-        return "timed out"
+        return "timeout"
     finish_reason = summary.get("finish_reason")
     if finish_reason and finish_reason != "completed":
         return str(finish_reason)
     eval_error = summary.get("eval", {}).get("error")
     if eval_error:
-        return str(eval_error)
+        return f"eval_{eval_error}"
     if summary.get("error"):
-        return "agent error"
+        return "agent_error"
     http_status = summary.get("eval", {}).get("http_status")
     if http_status and http_status != 200:
-        return f"http {http_status}"
-    return "unknown failure"
+        return f"http_{http_status}"
+    return "unknown"
 
 
 def _describe_failure(summary: dict[str, Any]) -> str:
     parts: list[str] = []
-    if summary.get("timed_out"):
-        parts.append("timed out")
-    finish_reason = summary.get("finish_reason")
-    if finish_reason and finish_reason != "completed":
-        parts.append(f"finish `{finish_reason}`")
-    eval_error = summary.get("eval", {}).get("error")
-    if eval_error:
-        parts.append(f"eval `{eval_error}`")
-    http_status = summary.get("eval", {}).get("http_status")
-    if http_status and http_status != 200:
-        parts.append(f"HTTP {http_status}")
-    agent_error = summary.get("error")
-    if agent_error:
-        short = str(agent_error).splitlines()[0][:120]
-        parts.append(f"error: {short}")
+    category = summary.get("failure_category") or (summary.get("agent_stop") or {}).get("category")
+    if category:
+        parts.append(f"**{category}**")
+    agent_stop_detail = (summary.get("agent_stop") or {}).get("detail")
+    if agent_stop_detail:
+        parts.append(str(agent_stop_detail)[:140])
+    else:
+        finish_reason = summary.get("finish_reason")
+        if finish_reason and finish_reason != "completed" and finish_reason != category:
+            parts.append(f"finish `{finish_reason}`")
+        eval_error = summary.get("eval", {}).get("error")
+        if eval_error:
+            parts.append(f"eval `{eval_error}`")
+        http_status = summary.get("eval", {}).get("http_status")
+        if http_status and http_status != 200:
+            parts.append(f"HTTP {http_status}")
+        agent_error = summary.get("error")
+        if agent_error:
+            short = str(agent_error).splitlines()[0][:120]
+            parts.append(short)
     wall = summary.get("wall_seconds")
     if isinstance(wall, (int, float)):
         parts.append(f"{wall:.1f} s")
-    return "; ".join(parts) or "unknown failure"
+    return " — ".join(parts) or "unknown failure"
 
 
 def _render_model_section(
@@ -334,6 +345,15 @@ def _render_model_section(
         ("API calls", str(summary.get("api_calls", 0))),
         ("Tool calls", str(summary.get("tool_calls", 0))),
     ]
+
+    agent_stop = summary.get("agent_stop")
+    if isinstance(agent_stop, dict) and agent_stop.get("category"):
+        detail = agent_stop.get("detail") or ""
+        rows.append(("Agent stop", f"`{agent_stop['category']}`" + (f" — {detail}" if detail else "")))
+
+    failure_category = summary.get("failure_category")
+    if failure_category:
+        rows.append(("Failure category", f"`{failure_category}`"))
 
     aider_stagnation_timeout = summary.get("aider_stagnation_timeout_seconds")
     if aider_stagnation_timeout is not None:

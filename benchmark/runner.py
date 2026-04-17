@@ -109,6 +109,28 @@ def _task_prompt_with_workspace_note(task_prompt: str) -> str:
     )
 
 
+def _classify_failure(summary: dict[str, Any]) -> str:
+    """Pick a stable category label for a failed run."""
+    if summary.get("timed_out"):
+        return "timeout"
+    agent_stop = summary.get("agent_stop") or {}
+    if agent_stop.get("category"):
+        return str(agent_stop["category"])
+    finish_reason = summary.get("finish_reason")
+    if finish_reason and finish_reason != "completed":
+        return str(finish_reason)
+    eval_result = summary.get("eval") or {}
+    eval_error = eval_result.get("error")
+    if eval_error:
+        return f"eval_{eval_error}"
+    http_status = eval_result.get("http_status")
+    if http_status and http_status != 200:
+        return f"http_{http_status}"
+    if summary.get("error"):
+        return "agent_error"
+    return "unknown"
+
+
 def _should_evaluate(agent_stats: dict[str, Any]) -> bool:
     """Return True when post-run evaluation can still produce meaningful data."""
     finish_reason = agent_stats.get("finish_reason")
@@ -213,6 +235,8 @@ async def _run_one(
         **agent_stats,
         "eval": eval_result,
     }
+    summary["passed"] = eval_result.get("http_status") == 200
+    summary["failure_category"] = None if summary["passed"] else _classify_failure(summary)
 
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     _print_summary(summary)
