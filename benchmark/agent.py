@@ -114,6 +114,11 @@ def _summarize_command_output(output: str) -> str:
     return f"{line_count} lines, {len(output)} chars"
 
 
+def _workspace_has_started_work(workspace: Path) -> bool:
+    """Return True once the model has created any workspace artifact."""
+    return any(workspace.iterdir())
+
+
 async def _run_bash(command: str, workspace: Path, active_process_groups: set[int]) -> str:
     logger.debug("bash: %s", command[:120])
     proc: asyncio.subprocess.Process | None = None
@@ -345,13 +350,20 @@ async def run_agent(
 
                 if nudge_count < MAX_NUDGES:
                     nudge_count += 1
-                    workspace_has_files = any(workspace.rglob("*.py"))
+                    workspace_has_files = _workspace_has_started_work(workspace)
                     if workspace_has_files:
-                        nudge_msg = (
-                            "The server is not running yet on port 8181. "
-                            "Use the bash tool to finish the application and start it. "
-                            "Run `uv run python app.py` or equivalent to start the server."
-                        )
+                        if (workspace / "pyproject.toml").exists():
+                            nudge_msg = (
+                                "The project is already initialized, so do not run `uv init` again. "
+                                "Use the bash tool to finish creating the application files, install any missing packages, "
+                                "and start the server on port 8181 with `uv run ...`."
+                            )
+                        else:
+                            nudge_msg = (
+                                "The workspace already contains files. "
+                                "Use the bash tool to finish the application and start the server on port 8181. "
+                                "Do not restart setup from scratch."
+                            )
                     else:
                         nudge_msg = (
                             "You haven't created any files yet. "

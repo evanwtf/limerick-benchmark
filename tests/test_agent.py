@@ -1,6 +1,13 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
-from benchmark.agent import _format_status_line, _parse_tool_arguments, _summarize_command_output
+from benchmark.agent import (
+    _format_status_line,
+    _parse_tool_arguments,
+    _summarize_command_output,
+    _workspace_has_started_work,
+)
 
 
 class ParseToolArgumentsTests(unittest.TestCase):
@@ -40,3 +47,15 @@ class AgentConsoleFormattingTests(unittest.TestCase):
 
     def test_preserves_short_single_line_output(self) -> None:
         self.assertEqual(_summarize_command_output("installed"), "installed")
+
+
+class AgentWorkspaceDetectionTests(unittest.TestCase):
+    def test_empty_workspace_is_not_started(self) -> None:
+        with TemporaryDirectory() as tmp:
+            self.assertFalse(_workspace_has_started_work(Path(tmp)))
+
+    def test_initialized_workspace_counts_as_started_without_python_files(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0.1.0'\n")
+            self.assertTrue(_workspace_has_started_work(workspace))
