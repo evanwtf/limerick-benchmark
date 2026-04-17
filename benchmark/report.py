@@ -113,9 +113,18 @@ def generate_markdown_report(
         "",
         "---",
         "",
-        "## Results",
+        "## Overview",
         "",
     ]
+    lines.extend(_render_overview(report.models))
+    lines.extend(
+        [
+            "---",
+            "",
+            "## Results",
+            "",
+        ]
+    )
 
     for index, model in enumerate(report.models, start=1):
         lines.extend(_render_model_section(index, model, include_placeholders))
@@ -198,6 +207,109 @@ def write_markdown_report(
     )
     path.write_text(markdown)
     return path
+
+
+def _render_overview(models: list[ModelReport]) -> list[str]:
+    total = len(models)
+    if total == 0:
+        return ["_No model runs recorded._", ""]
+
+    passes = [m for m in models if _is_pass(m.summary)]
+    fails = [m for m in models if not _is_pass(m.summary)]
+    pass_rate = _format_percent(len(passes), total)
+
+    lines: list[str] = []
+
+    if len(passes) == total:
+        headline = f"All {total} models produced a working app (pass rate {pass_rate})."
+    elif not passes:
+        headline = f"None of the {total} models produced a working app."
+    else:
+        headline = (
+            f"{len(passes)} of {total} models produced a working app "
+            f"(pass rate {pass_rate})."
+        )
+    lines.extend([headline, ""])
+
+    if passes:
+        wall_times = [
+            (m, float(m.summary["wall_seconds"]))
+            for m in passes
+            if isinstance(m.summary.get("wall_seconds"), (int, float))
+        ]
+        if wall_times:
+            fastest = min(wall_times, key=lambda kv: kv[1])
+            slowest = max(wall_times, key=lambda kv: kv[1])
+            avg = sum(t for _, t in wall_times) / len(wall_times)
+            if fastest[0].model_id == slowest[0].model_id:
+                lines.append(
+                    f"- Fastest pass: **{fastest[0].model_id}** in {fastest[1]:.1f} s."
+                )
+            else:
+                lines.append(
+                    f"- Fastest pass: **{fastest[0].model_id}** ({fastest[1]:.1f} s); "
+                    f"slowest pass: **{slowest[0].model_id}** ({slowest[1]:.1f} s); "
+                    f"mean pass time {avg:.1f} s."
+                )
+
+    if fails:
+        buckets = _bucket_failures(fails)
+        reason_summary = ", ".join(
+            f"{count} {label}" for label, count in buckets.most_common()
+        )
+        lines.append(f"- Failure breakdown: {reason_summary}.")
+        for model in fails:
+            lines.append(f"  - `{model.model_id}` — {_describe_failure(model.summary)}")
+
+    lines.append("")
+    return lines
+
+
+def _bucket_failures(fails: list[ModelReport]) -> Counter:
+    buckets: Counter = Counter()
+    for model in fails:
+        buckets[_failure_bucket(model.summary)] += 1
+    return buckets
+
+
+def _failure_bucket(summary: dict[str, Any]) -> str:
+    if summary.get("timed_out"):
+        return "timed out"
+    finish_reason = summary.get("finish_reason")
+    if finish_reason and finish_reason != "completed":
+        return str(finish_reason)
+    eval_error = summary.get("eval", {}).get("error")
+    if eval_error:
+        return str(eval_error)
+    if summary.get("error"):
+        return "agent error"
+    http_status = summary.get("eval", {}).get("http_status")
+    if http_status and http_status != 200:
+        return f"http {http_status}"
+    return "unknown failure"
+
+
+def _describe_failure(summary: dict[str, Any]) -> str:
+    parts: list[str] = []
+    if summary.get("timed_out"):
+        parts.append("timed out")
+    finish_reason = summary.get("finish_reason")
+    if finish_reason and finish_reason != "completed":
+        parts.append(f"finish `{finish_reason}`")
+    eval_error = summary.get("eval", {}).get("error")
+    if eval_error:
+        parts.append(f"eval `{eval_error}`")
+    http_status = summary.get("eval", {}).get("http_status")
+    if http_status and http_status != 200:
+        parts.append(f"HTTP {http_status}")
+    agent_error = summary.get("error")
+    if agent_error:
+        short = str(agent_error).splitlines()[0][:120]
+        parts.append(f"error: {short}")
+    wall = summary.get("wall_seconds")
+    if isinstance(wall, (int, float)):
+        parts.append(f"{wall:.1f} s")
+    return "; ".join(parts) or "unknown failure"
 
 
 def _render_model_section(
