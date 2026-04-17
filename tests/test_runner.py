@@ -13,6 +13,9 @@ class RunnerEvaluationPolicyTests(unittest.TestCase):
     def test_skips_evaluation_for_invalid_tool_loop(self) -> None:
         self.assertFalse(_should_evaluate({"finish_reason": "invalid_tool_loop", "error": None}))
 
+    def test_skips_evaluation_for_repeated_command_loop(self) -> None:
+        self.assertFalse(_should_evaluate({"finish_reason": "repeated_command_loop", "error": None}))
+
     def test_skips_evaluation_when_agent_errors(self) -> None:
         self.assertFalse(_should_evaluate({"finish_reason": "error", "error": "boom"}))
 

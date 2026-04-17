@@ -3,6 +3,8 @@
 import asyncio
 import json
 import logging
+import shlex
+import tomllib
 import types
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +27,7 @@ CMD_TIMEOUT_SECONDS = 60  # per bash command
 MAX_OUTPUT_CHARS = 8000  # truncate long command output
 STATUS_REFRESH_SECONDS = 0.25
 MAX_REDUNDANT_UV_INIT_STREAK = 5
+MAX_REPEATED_COMMAND_STREAK = 5
 
 SYSTEM_PROMPT = """\
 You are an expert Python developer. Complete the coding task by calling the bash tool.
@@ -129,6 +132,37 @@ def _contains_redundant_uv_init(command: str, workspace: Path) -> bool:
     return any(line.strip().startswith("uv init") for line in command.splitlines())
 
 
+def _normalize_dependency_name(spec: str) -> str:
+    """Normalize a dependency specifier to its package name."""
+    token = spec.strip()
+    if not token:
+        return ""
+    token = token.split(";")[0].strip()
+    for marker in ("[", "=", "<", ">", "!", "~"):
+        if marker in token:
+            token = token.split(marker, 1)[0]
+    return token.strip().lower().replace("_", "-")
+
+
+def _declared_dependencies(workspace: Path) -> set[str]:
+    """Return normalized dependency names already declared in pyproject.toml."""
+    pyproject = workspace / "pyproject.toml"
+    if not pyproject.exists():
+        return set()
+
+    try:
+        data = tomllib.loads(pyproject.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return set()
+
+    declared: set[str] = set()
+    for spec in data.get("project", {}).get("dependencies", []) or []:
+        name = _normalize_dependency_name(spec)
+        if name:
+            declared.add(name)
+    return declared
+
+
 def _prepare_command(command: str, workspace: Path) -> tuple[str | None, str | None]:
     """
     Rewrite redundant setup commands before execution.
@@ -141,22 +175,36 @@ def _prepare_command(command: str, workspace: Path) -> tuple[str | None, str | N
 
     lines = command.splitlines()
     kept_lines: list[str] = []
-    removed_uv_init = False
+    notes: list[str] = []
+    declared_dependencies = _declared_dependencies(workspace)
 
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("uv init"):
-            removed_uv_init = True
+            notes.append("Project already initialized; skipped redundant `uv init`.")
+            continue
+        if stripped.startswith("uv add"):
+            try:
+                tokens = shlex.split(stripped)
+            except ValueError:
+                kept_lines.append(line)
+                continue
+            packages = [token for token in tokens[2:] if not token.startswith("-")]
+            if packages and all(_normalize_dependency_name(pkg) in declared_dependencies for pkg in packages):
+                notes.append("Dependencies already declared; skipped redundant `uv add`.")
+                continue
+            for pkg in packages:
+                normalized = _normalize_dependency_name(pkg)
+                if normalized:
+                    declared_dependencies.add(normalized)
+            kept_lines.append(line)
             continue
         kept_lines.append(line)
 
-    if not removed_uv_init:
+    if not notes:
         return command, None
 
-    note = (
-        "Project already initialized; skipped redundant `uv init`. "
-        "Do not run `uv init` again. Proceed with `uv add ...`, create files, and start the server."
-    )
+    note = " ".join(notes) + " Do not run `uv init` again. Proceed with creating files and starting the server."
     if kept_lines:
         return "\n".join(kept_lines), note
     return None, note
@@ -250,6 +298,8 @@ async def run_agent(
     active_process_groups: set[int] = set()
     agent_started_at = asyncio.get_running_loop().time()
     redundant_uv_init_streak = 0
+    last_command_signature: str | None = None
+    repeated_command_streak = 0
 
     def append_trace(entry: dict) -> None:
         entry["ts"] = _ts()
@@ -263,7 +313,7 @@ async def run_agent(
     append_trace({"type": "task", "content": task_prompt})
 
     async def _loop() -> None:
-        nonlocal nudge_count, invalid_tool_count, redundant_uv_init_streak
+        nonlocal nudge_count, invalid_tool_count, redundant_uv_init_streak, last_command_signature, repeated_command_streak
         while True:
             token_state["api_calls"] += 1
             logger.info("API call #%d to %s", token_state["api_calls"], litellm_model)
@@ -506,6 +556,12 @@ async def run_agent(
                     redundant_uv_init_streak += 1
                 else:
                     redundant_uv_init_streak = 0
+                command_signature = " ".join(command.split())
+                if command_signature == last_command_signature:
+                    repeated_command_streak += 1
+                else:
+                    last_command_signature = command_signature
+                    repeated_command_streak = 1
 
                 if redundant_uv_init_streak > MAX_REDUNDANT_UV_INIT_STREAK:
                     output = (
@@ -521,6 +577,21 @@ async def run_agent(
                     logger.error("Aborting run after %d consecutive redundant uv init attempts",
                                  redundant_uv_init_streak)
                     stats["finish_reason"] = "redundant_uv_init_loop"
+                    return
+                if repeated_command_streak > MAX_REPEATED_COMMAND_STREAK:
+                    output = (
+                        "Error: detected the same command more than 5 times in a row. "
+                        "This run is being aborted as stuck."
+                    )
+                    append_trace({
+                        "type": "tool_result",
+                        "call_id": tc.id,
+                        "command": command,
+                        "output": output,
+                    })
+                    logger.error("Aborting run after %d consecutive identical commands: %s",
+                                 repeated_command_streak, command_signature)
+                    stats["finish_reason"] = "repeated_command_loop"
                     return
                 print(f"$ {command}", flush=True)
                 output = await _run_bash(command, workspace, active_process_groups)

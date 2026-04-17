@@ -3,8 +3,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from benchmark.agent import (
+    _declared_dependencies,
     _contains_redundant_uv_init,
     _format_status_line,
+    _normalize_dependency_name,
     _parse_tool_arguments,
     _prepare_command,
     _summarize_command_output,
@@ -88,3 +90,29 @@ class AgentWorkspaceDetectionTests(unittest.TestCase):
             self.assertFalse(_contains_redundant_uv_init("uv init .", workspace))
             (workspace / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0.1.0'\n")
             self.assertTrue(_contains_redundant_uv_init("uv init .", workspace))
+
+    def test_prepare_command_skips_redundant_uv_add(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "pyproject.toml").write_text(
+                "[project]\nname='demo'\nversion='0.1.0'\ndependencies=['flask>=3.0']\n"
+            )
+
+            command, note = _prepare_command("uv add flask", workspace)
+
+        self.assertIsNone(command)
+        self.assertIn("skipped redundant `uv add`", note)
+
+    def test_declared_dependencies_normalize_names(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "pyproject.toml").write_text(
+                "[project]\nname='demo'\nversion='0.1.0'\ndependencies=['Flask[async]>=3.0; python_version >= \"3.11\"']\n"
+            )
+
+            deps = _declared_dependencies(workspace)
+
+        self.assertEqual(deps, {"flask"})
+
+    def test_normalize_dependency_name(self) -> None:
+        self.assertEqual(_normalize_dependency_name("Flask[async]>=3.0"), "flask")
