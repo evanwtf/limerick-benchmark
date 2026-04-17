@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 TIMEOUT_SECONDS = 900  # 15 minutes hard limit
 CMD_TIMEOUT_SECONDS = 60  # per bash command
 MAX_OUTPUT_CHARS = 8000  # truncate long command output
+STATUS_REFRESH_SECONDS = 0.25
 
 SYSTEM_PROMPT = """\
 You are an expert Python developer. Complete the coding task by calling the bash tool.
@@ -72,6 +73,45 @@ def _parse_tool_arguments(raw_args: str | None) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("tool arguments must decode to a JSON object")
     return data
+
+
+def _format_status_line(
+    model_id: str,
+    *,
+    elapsed_s: float,
+    phase: str,
+    api_calls: int,
+    tool_calls: int,
+    output_tokens: int,
+    tokens_per_second: float,
+) -> str:
+    """Render one compact live status line for terminal output."""
+    minutes = int(elapsed_s // 60)
+    seconds = int(elapsed_s % 60)
+    return (
+        f"\r\033[2K[{model_id}] {minutes:02d}:{seconds:02d} | "
+        f"{phase:<11} | api={api_calls} tool={tool_calls} | "
+        f"out~={output_tokens:4d} tok | {tokens_per_second:4.1f} tok/s"
+    )
+
+
+def _summarize_command_output(output: str) -> str:
+    """Return a short human-readable summary of command output."""
+    if output in {"(no output)", ""}:
+        return "(no output)"
+    if output.startswith("[timeout") or output.startswith("[error:"):
+        return output
+
+    stripped = output.strip()
+    if "\n" not in stripped and len(stripped) <= 120:
+        return stripped
+
+    lines = [line for line in output.splitlines() if line.strip()]
+    line_count = len(output.splitlines())
+    preview = lines[0][:120] if lines else ""
+    if preview:
+        return f"{line_count} lines, {len(output)} chars | {preview}"
+    return f"{line_count} lines, {len(output)} chars"
 
 
 async def _run_bash(command: str, workspace: Path, active_process_groups: set[int]) -> str:
@@ -153,6 +193,7 @@ async def run_agent(
     invalid_tool_count = 0
     MAX_INVALID_TOOLS = 5
     active_process_groups: set[int] = set()
+    agent_started_at = asyncio.get_running_loop().time()
 
     def append_trace(entry: dict) -> None:
         entry["ts"] = _ts()
@@ -184,19 +225,51 @@ async def run_agent(
             full_content = ""
             tool_call_chunks: dict[int, dict] = {}  # index → {id, name, args}
             finish_reason = None
+            stream_started_at = asyncio.get_running_loop().time()
+            stream_text_chars = 0
+            stream_completion_tokens = 0
+            current_phase = "requesting"
+            last_status_update = 0.0
 
-            print(f"\n[{litellm_model}] ", end="", flush=True)
+            def render_status(phase: str, *, force: bool = False) -> None:
+                nonlocal current_phase, last_status_update
+                now = asyncio.get_running_loop().time()
+                if not force and (now - last_status_update) < STATUS_REFRESH_SECONDS:
+                    return
+                current_phase = phase
+                elapsed = now - agent_started_at
+                stream_elapsed = max(now - stream_started_at, 0.001)
+                output_tokens = max(stream_completion_tokens, stream_text_chars // 4)
+                tokens_per_second = output_tokens / stream_elapsed
+                print(
+                    _format_status_line(
+                        litellm_model,
+                        elapsed_s=elapsed,
+                        phase=current_phase,
+                        api_calls=token_state["api_calls"],
+                        tool_calls=token_state["tool_calls"],
+                        output_tokens=output_tokens,
+                        tokens_per_second=tokens_per_second,
+                    ),
+                    end="",
+                    flush=True,
+                )
+                last_status_update = now
+
+            render_status(current_phase, force=True)
             async for chunk in stream:
                 c = chunk.choices[0]
                 delta = c.delta
 
                 thinking = getattr(delta, "reasoning_content", None)
                 if thinking:
-                    print(thinking, end="", flush=True)
+                    stream_text_chars += len(thinking)
+                    current_phase = "thinking"
 
                 if delta.content:
-                    print(delta.content, end="", flush=True)
+                    stream_text_chars += len(delta.content)
                     full_content += delta.content
+                    current_phase = "responding"
 
                 for tc_chunk in delta.tool_calls or []:
                     idx = tc_chunk.index
@@ -210,6 +283,7 @@ async def run_agent(
                             entry["name"] += tc_chunk.function.name
                         if tc_chunk.function.arguments:
                             entry["args"] += tc_chunk.function.arguments
+                    current_phase = "tool call"
 
                 if c.finish_reason:
                     finish_reason = c.finish_reason
@@ -217,8 +291,12 @@ async def run_agent(
                 if hasattr(chunk, "usage") and chunk.usage:
                     token_state["tokens_in"] += chunk.usage.prompt_tokens or 0
                     token_state["tokens_out"] += chunk.usage.completion_tokens or 0
+                    stream_completion_tokens = max(stream_completion_tokens, chunk.usage.completion_tokens or 0)
 
-            print()  # newline after streamed content
+                render_status(current_phase)
+
+            render_status(current_phase, force=True)
+            print()
 
             # Reconstruct tool_calls from chunks
             tool_calls = [
@@ -361,9 +439,9 @@ async def run_agent(
                         "content": output,
                     })
                     continue
-                print(f"\n$ {command}", flush=True)
+                print(f"$ {command}", flush=True)
                 output = await _run_bash(command, workspace, active_process_groups)
-                print(output[:1000] if output else "(no output)", flush=True)
+                print(f"-> {_summarize_command_output(output)}", flush=True)
                 logger.info("tool[%d] bash done", token_state["tool_calls"])
 
                 append_trace({
