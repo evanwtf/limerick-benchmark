@@ -6,6 +6,7 @@ Usage:
     uv run python -m benchmark run --set {poc,v1,recommended,local,reference}
     uv run python -m benchmark run --model gemma4:e2b
     uv run python -m benchmark run --set poc --timeout 300
+    uv run python -m benchmark report --job-id 20260417.083818
 """
 
 import argparse
@@ -20,6 +21,7 @@ from rich.table import Table
 
 from .agent import TIMEOUT_SECONDS
 from .ollama_utils import get_local_models, get_pulled_names
+from .report import generate_markdown_report, resolve_job_dir
 from .runner import run_benchmark
 
 logging.basicConfig(
@@ -219,11 +221,55 @@ def main() -> None:
         help="Collect GPU/thermal/fan metrics via powermetrics (may prompt for sudo)",
     )
 
+    # report subcommand
+    report_p = sub.add_parser("report", help="Generate a Markdown report from an existing job")
+    report_p.add_argument(
+        "--job-id",
+        required=True,
+        help="Existing benchmark job id (for example 20260417.083818)",
+    )
+    report_p.add_argument(
+        "--output",
+        type=Path,
+        help="Write the report to a file instead of stdout",
+    )
+    report_p.add_argument(
+        "--task",
+        dest="task_label",
+        help="Override the task label shown in the report header",
+    )
+    report_p.add_argument(
+        "--agent",
+        choices=["react", "aider"],
+        dest="agent_label",
+        help="Override the agent label shown in the report header",
+    )
+    report_p.add_argument(
+        "--no-placeholders",
+        action="store_true",
+        help="Omit placeholder commentary lines from the generated Markdown",
+    )
+
     args = parser.parse_args()
     catalog = load_catalog()
 
     if args.command == "list":
         cmd_list(catalog)
+        return
+
+    if args.command == "report":
+        job_dir = resolve_job_dir(args.job_id)
+        markdown = generate_markdown_report(
+            job_dir,
+            task_label=args.task_label,
+            agent_label=args.agent_label,
+            include_placeholders=not args.no_placeholders,
+        )
+        if args.output:
+            args.output.write_text(markdown)
+            logger.info("Wrote report to %s", args.output)
+        else:
+            sys.stdout.write(markdown)
         return
 
     # --- run ---
