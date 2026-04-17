@@ -101,8 +101,8 @@ def _task_prompt_with_workspace_note(task_prompt: str) -> str:
     return (
         "Environment note:\n"
         "- The current directory is already initialized as a uv project with Python 3.12.\n"
-        "- DO NOT run `uv init` or `uv add`.\n"
-        "- Flask is already installed.\n"
+        "- Do not run `uv init` again.\n"
+        "- Flask is already installed. Do not run `uv add flask`.\n"
         "- Just create the application files and ensure the server starts on port 8181.\n\n"
         f"{task_prompt}"
     )
