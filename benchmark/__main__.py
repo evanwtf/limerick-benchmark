@@ -207,6 +207,11 @@ def main() -> None:
         action="store_true",
         help="Skip models not yet pulled instead of aborting",
     )
+    run_p.add_argument(
+        "--enable-hardware-metrics",
+        action="store_true",
+        help="Collect GPU/thermal/fan metrics via powermetrics (may prompt for sudo)",
+    )
 
     args = parser.parse_args()
     catalog = load_catalog()
@@ -251,7 +256,14 @@ def main() -> None:
             sys.exit(1)
 
     console.print()
-    summaries = asyncio.run(run_benchmark(models, task_name=args.task, timeout=args.timeout))
+    summaries = asyncio.run(
+        run_benchmark(
+            models,
+            task_name=args.task,
+            timeout=args.timeout,
+            enable_hardware_metrics=args.enable_hardware_metrics,
+        )
+    )
 
     passed = sum(1 for s in summaries if s.get("eval", {}).get("http_status") == 200)
     logger.info("Done. %d/%d returned HTTP 200.", passed, len(summaries))

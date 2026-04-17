@@ -41,7 +41,12 @@ def _load_task(task_name: str) -> str:
     return path.read_text()
 
 
-async def _run_one(model: dict[str, Any], task_prompt: str, timeout: int) -> dict[str, Any]:
+async def _run_one(
+    model: dict[str, Any],
+    task_prompt: str,
+    timeout: int,
+    enable_hardware_metrics: bool,
+) -> dict[str, Any]:
     """Run the full benchmark pipeline for a single model."""
     model_id: str = model["id"]
     provider: str = model.get("provider", "ollama")
@@ -72,7 +77,10 @@ async def _run_one(model: dict[str, Any], task_prompt: str, timeout: int) -> dic
         "tool_calls": 0,
     }
 
-    collector = MetricsCollector(run_dir / "metrics.csv")
+    collector = MetricsCollector(
+        run_dir / "metrics.csv",
+        enable_hardware_metrics=enable_hardware_metrics,
+    )
     collector.start(token_state)
 
     wall_start = time.time()
@@ -135,17 +143,29 @@ async def run_benchmark(
     models: list[dict[str, Any]],
     task_name: str = "limerick",
     timeout: int = TIMEOUT_SECONDS,
+    enable_hardware_metrics: bool = False,
 ) -> list[dict[str, Any]]:
     """Run all models serially. Returns list of summary dicts."""
     task_prompt = _load_task(task_name)
     RESULTS_ROOT.mkdir(exist_ok=True)
 
-    logger.info("Starting benchmark: %d model(s), task=%s, timeout=%ds", len(models), task_name, timeout)
+    logger.info(
+        "Starting benchmark: %d model(s), task=%s, timeout=%ds, hardware_metrics=%s",
+        len(models),
+        task_name,
+        timeout,
+        enable_hardware_metrics,
+    )
 
     summaries = []
     for i, model in enumerate(models, 1):
         logger.info("Run %d/%d: %s", i, len(models), model["id"])
-        summary = await _run_one(model, task_prompt, timeout)
+        summary = await _run_one(
+            model,
+            task_prompt,
+            timeout,
+            enable_hardware_metrics=enable_hardware_metrics,
+        )
         summaries.append(summary)
 
     return summaries

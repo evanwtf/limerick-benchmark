@@ -7,7 +7,7 @@ A benchmark suite for evaluating LLM coding ability on local Apple Silicon hardw
 1. The runner starts a fresh agent session for each model, serially (never two at once, so GPU is never contested)
 2. The agent receives the task prompt and can call a `bash` tool to create files, install packages, run the server, read output, and fix errors — just like a developer at a terminal
 3. The run is **hard-killed after 15 minutes** if not complete
-4. System metrics (CPU, GPU utilization, GPU power, thermals, fan RPM, token counts) are sampled every 5 seconds throughout the run
+4. System metrics (CPU, memory, token counts, and optionally GPU/thermal/fan data) are sampled every 5 seconds throughout the run
 5. After the run, you manually evaluate by running `./run.sh` in the result directory
 
 ## Current task: Limerick Generator
@@ -36,7 +36,7 @@ The first two checks are automated pass/fail gates — if the server doesn't sta
 - [Ollama](https://ollama.ai) installed and running (`ollama serve`)
 - Python 3.11+ and [uv](https://docs.astral.sh/uv/)
 - `ANTHROPIC_API_KEY` set (for reference model runs)
-- `sudo` access — needed for `powermetrics` GPU/thermal sampling
+- `sudo` access only if you choose `--enable-hardware-metrics`
 
 ## Quick start
 
@@ -53,6 +53,9 @@ uv run prefetch --set recommended --dry-run   # preview first
 
 # Run the POC (2 smallest models — good for validating the harness)
 uv run benchmark run --set poc
+
+# Opt in to privileged Apple Silicon hardware metrics
+uv run benchmark run --set poc --enable-hardware-metrics
 
 # Run only models already in your local Ollama store
 uv run benchmark run --set local
@@ -142,7 +145,7 @@ Workspaces are kept outside the repo tree so that `uv init` inside them cannot a
 | `api_calls` | benchmark | cumulative model API calls |
 | `tool_calls` | benchmark | cumulative bash tool invocations |
 
-`powermetrics` requires `sudo`. The benchmark will prompt on first run. To avoid repeated prompts, add to `/etc/sudoers` (via `visudo`):
+GPU/thermal/fan columns are populated only when `--enable-hardware-metrics` is passed. That mode uses `powermetrics`, which requires `sudo`. To avoid repeated prompts, add to `/etc/sudoers` (via `visudo`):
 ```
 yourusername ALL=(ALL) NOPASSWD: /usr/bin/powermetrics
 ```

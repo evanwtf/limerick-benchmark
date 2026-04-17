@@ -82,8 +82,9 @@ class MetricsCollector:
     so each CSV row captures live token progress.
     """
 
-    def __init__(self, csv_path: Path) -> None:
+    def __init__(self, csv_path: Path, *, enable_hardware_metrics: bool = False) -> None:
         self._csv_path = csv_path
+        self._enable_hardware_metrics = enable_hardware_metrics
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._start_time: float = 0.0
@@ -119,7 +120,7 @@ class MetricsCollector:
         elapsed = round(time.time() - self._start_time, 1)
         cpu = psutil.cpu_percent(interval=None)
         mem = psutil.virtual_memory().percent
-        pm = _sample_powermetrics()
+        pm = _sample_powermetrics() if self._enable_hardware_metrics else {}
 
         return {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
