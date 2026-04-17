@@ -96,7 +96,10 @@ async def run_agent(
     token_state is mutated in-place so the metrics collector can read live counts.
     """
     if provider == "ollama":
-        litellm_model = f"ollama/{model_id}"
+        # ollama_chat/ uses /api/chat endpoint which supports native tool calling.
+        # ollama/ uses /api/generate and falls back to JSON-format tool emulation,
+        # which breaks for thinking models (Qwen3, etc.) that stream reasoning tokens.
+        litellm_model = f"ollama_chat/{model_id}"
         extra_kwargs: dict[str, Any] = {"api_base": "http://localhost:11434"}
     else:
         litellm_model = model_id
@@ -153,6 +156,10 @@ async def run_agent(
             async for chunk in stream:
                 c = chunk.choices[0]
                 delta = c.delta
+
+                thinking = getattr(delta, "reasoning_content", None)
+                if thinking:
+                    print(thinking, end="", flush=True)
 
                 if delta.content:
                     print(delta.content, end="", flush=True)
@@ -218,21 +225,40 @@ async def run_agent(
             messages.append(msg_dict)
 
             if not msg.tool_calls:
-                # Model returned without using tools. If the workspace is still
-                # empty this is a non-starter — push it once, then give up.
-                workspace_has_files = any(workspace.rglob("*"))
-                if not workspace_has_files and token_state["tool_calls"] == 0 and nudge_count < MAX_NUDGES:
+                # Check if the task looks complete: server running on port 8181
+                import socket
+                def _port_open() -> bool:
+                    try:
+                        with socket.create_connection(("localhost", 8181), timeout=1):
+                            return True
+                    except OSError:
+                        return False
+
+                if _port_open():
+                    # Server is up — task is done
+                    stats["finish_reason"] = choice.finish_reason
+                    logger.info("Agent finished with server running: %s", choice.finish_reason)
+                    break
+
+                if nudge_count < MAX_NUDGES:
                     nudge_count += 1
-                    logger.warning("Model returned without using tools — nudging (%d/%d)", nudge_count, MAX_NUDGES)
-                    messages.append({
-                        "role": "user",
-                        "content": (
+                    workspace_has_files = any(workspace.rglob("*.py"))
+                    if workspace_has_files:
+                        nudge_msg = (
+                            "The server is not running yet on port 8181. "
+                            "Use the bash tool to finish the application and start it. "
+                            "Run `uv run python app.py` or equivalent to start the server."
+                        )
+                    else:
+                        nudge_msg = (
                             "You haven't created any files yet. "
                             "Use the bash tool RIGHT NOW to start building the application. "
                             "Begin with: uv init . && uv add flask"
-                        ),
-                    })
+                        )
+                    logger.warning("Model returned without completing task — nudging (%d/%d)", nudge_count, MAX_NUDGES)
+                    messages.append({"role": "user", "content": nudge_msg})
                     continue
+
                 stats["finish_reason"] = choice.finish_reason
                 logger.info("Agent finished: %s", choice.finish_reason)
                 break
