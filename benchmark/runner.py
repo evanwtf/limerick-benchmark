@@ -41,6 +41,16 @@ def _load_task(task_name: str) -> str:
     return path.read_text()
 
 
+def _should_evaluate(agent_stats: dict[str, Any]) -> bool:
+    """Return True when post-run evaluation can still produce meaningful data."""
+    finish_reason = agent_stats.get("finish_reason")
+    if finish_reason in {"redundant_uv_init_loop", "invalid_tool_loop"}:
+        return False
+    if agent_stats.get("error"):
+        return False
+    return True
+
+
 async def _run_one(
     model: dict[str, Any],
     task_prompt: str,
@@ -98,9 +108,20 @@ async def _run_one(
     wall_elapsed = round(time.time() - wall_start, 1)
     collector.stop()
 
-    assert_port_available(PORT, f"evaluating {model_id}")
-    logger.info("Agent done in %.1fs — evaluating…", wall_elapsed)
-    eval_result = await evaluate(workspace, run_dir)
+    if _should_evaluate(agent_stats):
+        assert_port_available(PORT, f"evaluating {model_id}")
+        logger.info("Agent done in %.1fs — evaluating…", wall_elapsed)
+        eval_result = await evaluate(workspace, run_dir)
+    else:
+        logger.info("Agent done in %.1fs — skipping evaluation (%s)", wall_elapsed, agent_stats.get("finish_reason"))
+        eval_result = {
+            "entry_point": None,
+            "entry_point_candidates": [],
+            "server_started": False,
+            "http_status": None,
+            "response_bytes": None,
+            "error": "evaluation_skipped",
+        }
 
     summary = {
         "model_id": model_id,
