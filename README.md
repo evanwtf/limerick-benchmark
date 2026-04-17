@@ -2,13 +2,60 @@
 
 A benchmark suite for evaluating LLM coding ability on local Apple Silicon hardware. Each model gets a coding task, a tool to act on a workspace, and a hard 15-minute timebox to produce a working result — no hints, no hand-holding.
 
+## Quick start
+
+```bash
+# Install dependencies
+uv sync
+
+# See what models are already pulled locally
+uv run benchmark list
+
+# Preview or pull the recommended local models
+uv run prefetch --set recommended --dry-run
+uv run prefetch --set recommended
+
+# Pull a specific set of models
+uv run prefetch --model gemma4:e2b qwen3.5:9b
+
+# Run a fast proof-of-concept pass
+uv run benchmark run --set poc
+
+# Run the recommended benchmark set with the default ReAct agent
+uv run benchmark run --set recommended
+
+# Run the recommended benchmark set with Aider
+uv run benchmark run --agent aider --set recommended
+
+# Skip any missing Ollama models instead of aborting
+uv run benchmark run --agent aider --set recommended --skip-missing
+
+# Run only models already present in your local Ollama store
+uv run benchmark run --set local
+
+# Run only the Anthropic reference models
+uv run benchmark run --set reference
+
+# Increase the aider stagnation watchdog from the 300s default
+uv run benchmark run --agent aider --set recommended --aider-stagnation-timeout 420
+
+# Generate a Markdown report for an existing job
+uv run benchmark report --job-id 20260417.083818
+
+# Write the report to a file
+uv run benchmark report --job-id 20260417.083818 --output results_20260417.083818.md
+
+# Re-run a generated app manually from a finished result directory
+cd results/20260417.083818/gemma4_e2b && ./run.sh
+```
+
 ## How it works
 
 1. The runner starts a fresh agent session for each model, serially (never two at once, so the GPU is never contested).
 2. The workspace is pre-initialized as a `uv` project on Python 3.12 with Flask already installed, and lives **outside** the repo at `~/.limerick-benchmark/workspaces/<timestamp>_<slug>/`. The task prompt is prefixed with an environment note telling the model to skip `uv init` / `uv add`.
 3. One of two agent backends drives the run:
    - **ReAct (default)** — `litellm` + a single `bash` tool. Loop-detection guards abort on repeated commands, redundant `uv init`, or the same file being overwritten in a tight loop.
-   - **Aider (`--agent aider`)** — the Aider CLI in headless mode, wrapped with log-repeat detection, per-file edit caps, and a workspace-hash stagnation watch that kills the run if the tree is unchanged for 180 seconds.
+   - **Aider (`--agent aider`)** — the Aider CLI in headless mode, wrapped with log-repeat detection, per-file edit caps, and a workspace-hash stagnation watch that kills the run if the tree is unchanged for 300 seconds by default (`--aider-stagnation-timeout` to override).
 4. The run is **hard-killed after 15 minutes** by default (override with `--timeout`).
 5. System metrics (CPU, memory, token counts, and optionally GPU / thermal / fan data) are sampled every 5 seconds throughout the run.
 6. After the run, the evaluator auto-discovers entry points (`run.sh`, `[project.scripts]`, `app.py` / `main.py` / `server.py` / `web.py`, Flask-containing `.py` files, and `python -m <pkg>`), starts the server, and checks for HTTP 200 on port 8181. A convenience `run.sh` is written to the results directory for manual re-evaluation.
@@ -43,7 +90,7 @@ See [`results_20260417_073034.md`](results_20260417_073034.md) for an example mu
 - `ANTHROPIC_API_KEY` set (for reference model runs)
 - `sudo` access only if you choose `--enable-hardware-metrics`
 
-## Quick start
+## More commands
 
 ```bash
 # Install dependencies
@@ -81,6 +128,9 @@ uv run benchmark run --set reference
 # Use the Aider backend instead of the default ReAct loop
 uv run benchmark run --set poc --agent aider
 
+# Override the default 300-second Aider stagnation watchdog
+uv run benchmark run --set poc --agent aider --aider-stagnation-timeout 420
+
 # Override the default 15-minute per-model hard limit
 uv run benchmark run --set poc --timeout 600
 
@@ -101,6 +151,7 @@ After each run, open the result directory and run `./run.sh` to start the genera
 | `--task NAME` | `limerick` | Task file name (without `.md`) in `tasks/`. |
 | `--timeout SECONDS` | 900 | Per-model hard limit. |
 | `--agent {react,aider}` | `react` | Agent backend. |
+| `--aider-stagnation-timeout SECONDS` | 300 | Abort an Aider run if the workspace tree stays unchanged this long. |
 | `--skip-missing` | off | Skip Ollama models that aren't pulled instead of aborting the run plan. |
 | `--enable-hardware-metrics` | off | Collect GPU / thermal / fan metrics via `powermetrics` (prompts for `sudo`). |
 
@@ -197,7 +248,7 @@ yourusername ALL=(ALL) NOPASSWD: /usr/bin/powermetrics
 Both agent backends abort early if they get stuck, so a stalled model doesn't burn the full 15-minute budget:
 
 - **ReAct** — aborts on 5 consecutive identical commands, 5 consecutive redundant `uv init` attempts, 3+ consecutive rewrites of the same file, or 5 malformed / unknown tool calls. The `finish_reason` in `summary.json` records which guard tripped.
-- **Aider** — aborts on low log-line uniqueness over a rolling window, a detectable repeating log cycle, any single file being edited more than `AIDER_MAX_EDITS_PER_FILE` times, or the workspace tree hash not changing for 180 seconds. Aider stdout is prefixed with `[N/total:model-id:agent]` so multi-model runs stay grep-friendly.
+- **Aider** — aborts on low log-line uniqueness over a rolling window, a detectable repeating log cycle, any single file being edited more than `AIDER_MAX_EDITS_PER_FILE` times, or the workspace tree hash not changing for 300 seconds by default. Use `--aider-stagnation-timeout` to change that threshold. Aider stdout is prefixed with `[N/total:model-id:agent]` so multi-model runs stay grep-friendly.
 
 When either guard trips, the run is recorded with `finish_reason: stuck_loop` and the post-run HTTP evaluation is skipped.
 
