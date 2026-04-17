@@ -11,6 +11,7 @@ from benchmark.agent import (
     _prepare_command,
     _summarize_command_output,
     _workspace_has_started_work,
+    _written_file_target,
 )
 
 
@@ -116,3 +117,8 @@ class AgentWorkspaceDetectionTests(unittest.TestCase):
 
     def test_normalize_dependency_name(self) -> None:
         self.assertEqual(_normalize_dependency_name("Flask[async]>=3.0"), "flask")
+
+    def test_written_file_target_detects_redirect_target(self) -> None:
+        self.assertEqual(_written_file_target("cat <<EOF > app.py\nhello\nEOF"), "app.py")
+        self.assertEqual(_written_file_target("printf foo > src/app.py"), "src/app.py")
+        self.assertIsNone(_written_file_target("uv run python app.py"))

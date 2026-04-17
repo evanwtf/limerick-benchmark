@@ -107,7 +107,7 @@ def _task_prompt_with_workspace_note(task_prompt: str) -> str:
 def _should_evaluate(agent_stats: dict[str, Any]) -> bool:
     """Return True when post-run evaluation can still produce meaningful data."""
     finish_reason = agent_stats.get("finish_reason")
-    if finish_reason in {"redundant_uv_init_loop", "invalid_tool_loop", "repeated_command_loop"}:
+    if finish_reason in {"redundant_uv_init_loop", "invalid_tool_loop", "repeated_command_loop", "repeated_file_write_loop"}:
         return False
     if agent_stats.get("error"):
         return False

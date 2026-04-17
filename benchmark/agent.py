@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import re
 import shlex
 import tomllib
 import types
@@ -28,6 +29,7 @@ MAX_OUTPUT_CHARS = 8000  # truncate long command output
 STATUS_REFRESH_SECONDS = 0.25
 MAX_REDUNDANT_UV_INIT_STREAK = 5
 MAX_REPEATED_COMMAND_STREAK = 5
+MAX_REPEATED_FILE_WRITE_STREAK = 3
 
 SYSTEM_PROMPT = """\
 You are an expert Python developer. Complete the coding task by calling the bash tool.
@@ -64,6 +66,8 @@ TOOLS = [
         },
     }
 ]
+
+_FILE_WRITE_RE = re.compile(r">\s*([A-Za-z0-9_./-]+)")
 
 
 def _parse_tool_arguments(raw_args: str | None) -> dict[str, Any]:
@@ -161,6 +165,14 @@ def _declared_dependencies(workspace: Path) -> set[str]:
         if name:
             declared.add(name)
     return declared
+
+
+def _written_file_target(command: str) -> str | None:
+    """Return the file path being overwritten, when detectable."""
+    matches = _FILE_WRITE_RE.findall(command)
+    if not matches:
+        return None
+    return matches[-1]
 
 
 def _prepare_command(command: str, workspace: Path) -> tuple[str | None, str | None]:
@@ -300,6 +312,8 @@ async def run_agent(
     redundant_uv_init_streak = 0
     last_command_signature: str | None = None
     repeated_command_streak = 0
+    last_written_file: str | None = None
+    repeated_file_write_streak = 0
 
     def append_trace(entry: dict) -> None:
         entry["ts"] = _ts()
@@ -313,7 +327,9 @@ async def run_agent(
     append_trace({"type": "task", "content": task_prompt})
 
     async def _loop() -> None:
-        nonlocal nudge_count, invalid_tool_count, redundant_uv_init_streak, last_command_signature, repeated_command_streak
+        nonlocal nudge_count, invalid_tool_count, redundant_uv_init_streak
+        nonlocal last_command_signature, repeated_command_streak
+        nonlocal last_written_file, repeated_file_write_streak
         while True:
             token_state["api_calls"] += 1
             logger.info("API call #%d to %s", token_state["api_calls"], litellm_model)
@@ -562,6 +578,16 @@ async def run_agent(
                 else:
                     last_command_signature = command_signature
                     repeated_command_streak = 1
+                written_file = _written_file_target(command)
+                if written_file is not None:
+                    if written_file == last_written_file:
+                        repeated_file_write_streak += 1
+                    else:
+                        last_written_file = written_file
+                        repeated_file_write_streak = 1
+                else:
+                    last_written_file = None
+                    repeated_file_write_streak = 0
 
                 if redundant_uv_init_streak > MAX_REDUNDANT_UV_INIT_STREAK:
                     output = (
@@ -592,6 +618,24 @@ async def run_agent(
                     logger.error("Aborting run after %d consecutive identical commands: %s",
                                  repeated_command_streak, command_signature)
                     stats["finish_reason"] = "repeated_command_loop"
+                    return
+                if repeated_file_write_streak > MAX_REPEATED_FILE_WRITE_STREAK:
+                    output = (
+                        f"Error: detected the same file being overwritten more than {MAX_REPEATED_FILE_WRITE_STREAK} times in a row "
+                        f"({written_file}). This run is being aborted as stuck."
+                    )
+                    append_trace({
+                        "type": "tool_result",
+                        "call_id": tc.id,
+                        "command": command,
+                        "output": output,
+                    })
+                    logger.error(
+                        "Aborting run after %d consecutive overwrites of %s",
+                        repeated_file_write_streak,
+                        written_file,
+                    )
+                    stats["finish_reason"] = "repeated_file_write_loop"
                     return
                 print(f"$ {command}", flush=True)
                 output = await _run_bash(command, workspace, active_process_groups)
