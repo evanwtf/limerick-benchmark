@@ -824,7 +824,7 @@ other:
     notes: "Full BF16. Fits in 64 GB but only ~4 GB headroom — monitor for memory pressure."
 
   # --- Distilled reasoning model (community fine-tune on Gemma 4) ---
-  - id: "gemma-4-claude-opus-4.6-thinking-s7-multimodal:latest"
+  - id: "ShreyanGondaliya/gemma-4-claude-opus-4.6-thinking-s7-multimodal:latest"
     provider: ollama
     released: "2026-04-01"
     size_gb: 33.0
