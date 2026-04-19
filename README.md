@@ -258,6 +258,32 @@ Keep it that way.
 | `tokens_in` | LiteLLM | cumulative prompt tokens |
 | `tokens_out` | LiteLLM | cumulative completion tokens |
 | `api_calls` | benchmark | cumulative model API calls |
+
+`summary.json` now carries the higher-signal facts that feed repeated-run
+analysis:
+
+- Lifecycle + timing: `started_at`, `agent_finished_at`,
+  `eval_started_at`, `eval_finished_at`, `finished_at`,
+  `wall_seconds`, `agent_seconds`, `eval_seconds`,
+  `first_edit_seconds`, `startup_seconds`
+- Trace-derived behavior: `trace_line_count`,
+  `assistant_answer_count`, `verification_marker_count`,
+  `self_correction_marker_count`,
+  `format_fixation_marker_count`,
+  `duplicate_output_attempt_count`
+- Workspace/code artifacts: `workspace_file_count`,
+  `files_created_count`, `files_modified_count`,
+  `app_py_sha256`, `app_py_bytes`, `app_py_loc`,
+  `uses_render_template_string`, `uses_inline_html`,
+  `route_count`, `dependency_count`
+
+Repeated-run Markdown reports aggregate those raw facts into model-level
+variance and stability summaries:
+
+- wall-time spread (`stddev`, `p90`) alongside median/fastest/slowest
+- distinct `app.py` hash counts and distinct solution-shape counts
+- median timing breakdowns for agent/edit/eval/startup phases
+- per-position pass rate and median wall time so round-order effects are visible
 | `tool_calls` | benchmark | cumulative bash tool invocations |
 
 GPU/thermal/fan columns are populated only when
