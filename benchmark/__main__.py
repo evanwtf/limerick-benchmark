@@ -3,9 +3,10 @@ CLI entry point: python -m benchmark <command>
 
 Usage:
     uv run python -m benchmark list
-    uv run python -m benchmark run --set {poc,v1,recommended,local,reference}
+    uv run python -m benchmark run --set {poc,v1,recommended,qwen-coding,local,reference}
     uv run python -m benchmark run --model gemma4:e2b
     uv run python -m benchmark run --set poc --timeout 300
+    uv run python -m benchmark run --set qwen-coding
     uv run python -m benchmark run --set poc --agent aider --aider-stagnation-timeout 420
     uv run python -m benchmark report --job-id 20260417.083818
 """
@@ -21,6 +22,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .agent import AIDER_STAGNATION_SECONDS, TIMEOUT_SECONDS
+from .model_sets import BENCHMARK_SET_CHOICES, NAMED_MODEL_SETS, format_set_metavar
 from .ollama_utils import get_local_models, get_pulled_names
 from .report import generate_markdown_report, resolve_job_dir
 from .runner import run_benchmark
@@ -69,12 +71,15 @@ def models_for_set(catalog: dict, model_set: str, pulled: set[str]) -> list[dict
         ]
         return catalog_matches + local_only
 
-    key_map = {"poc": "poc", "v1": "v1", "recommended": "recommended"}
-    if model_set not in key_map:
-        logger.error("Unknown set '%s'. Choose: poc, v1, recommended, local, reference", model_set)
+    if model_set not in NAMED_MODEL_SETS:
+        logger.error(
+            "Unknown set '%s'. Choose: %s",
+            model_set,
+            ", ".join(BENCHMARK_SET_CHOICES),
+        )
         sys.exit(1)
 
-    key = key_map[model_set]
+    key = NAMED_MODEL_SETS[model_set]
     return [e for e in catalog.values() if is_runnable(e) and e.get(key)]
 
 
@@ -100,9 +105,9 @@ def cmd_list(catalog: dict) -> None:
         if entry:
             in_catalog = "[green]✓[/green]"
             sets = []
-            for flag in ("poc", "v1", "recommended"):
-                if entry.get(flag):
-                    sets.append(flag)
+            for set_name, field_name in NAMED_MODEL_SETS.items():
+                if entry.get(field_name):
+                    sets.append(set_name)
             if entry.get("exclude"):
                 sets.append(f"[red]excluded[/red]")
             sets_str = ", ".join(sets) if sets else "—"
@@ -126,11 +131,13 @@ def cmd_list(catalog: dict) -> None:
         if e.get("provider") == "ollama"
         and not e.get("exclude")
         and e["id"] not in pulled_names
-        and any(e.get(f) for f in ("poc", "v1", "recommended"))
+        and any(e.get(field_name) for field_name in NAMED_MODEL_SETS.values())
     ]
     if not_pulled:
-        console.print(f"\n[dim]{len(not_pulled)} recommended/poc/v1 model(s) not yet pulled "
-                      f"(run prefetch.py --set recommended to download)[/dim]")
+        console.print(
+            f"\n[dim]{len(not_pulled)} named-set model(s) not yet pulled "
+            f"(use `uv run prefetch --set <set>` or `uv run prefetch --model <id>`)[/dim]"
+        )
 
 
 def preflight_check(models: list[dict], pulled: set[str]) -> bool:
@@ -188,8 +195,8 @@ def main() -> None:
     group.add_argument(
         "--set",
         dest="model_set",
-        choices=["poc", "v1", "recommended", "local", "reference"],
-        metavar="{poc,v1,recommended,local,reference}",
+        choices=list(BENCHMARK_SET_CHOICES),
+        metavar=format_set_metavar(BENCHMARK_SET_CHOICES),
         help="Named model set (local = whatever is already pulled)",
     )
     group.add_argument(

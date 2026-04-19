@@ -5,6 +5,7 @@ Usage:
     uv run python prefetch.py --set poc
     uv run python prefetch.py --set v1
     uv run python prefetch.py --set recommended
+    uv run python prefetch.py --set qwen-coding
     uv run python prefetch.py --model gemma4:e2b qwen3.5:9b
     uv run python prefetch.py --set recommended --dry-run
 """
@@ -20,6 +21,7 @@ import yaml
 from rich.console import Console
 from rich.table import Table
 
+from benchmark.model_sets import NAMED_MODEL_SETS, PREFETCH_SET_CHOICES, format_set_metavar
 from benchmark.ollama_utils import get_pulled_names
 
 logging.basicConfig(
@@ -51,16 +53,15 @@ def models_for_set(catalog: dict[str, dict], model_set: str) -> list[dict]:
     def is_local_ollama(e: dict) -> bool:
         return e.get("provider") == "ollama" and not e.get("exclude")
 
-    key_map = {"poc": "poc", "v1": "v1", "recommended": "recommended"}
-
     if model_set == "all":
         return [e for e in catalog.values() if is_local_ollama(e)]
 
-    if model_set not in key_map:
-        console.print(f"[red]Unknown set '{model_set}'. Choose from: poc, v1, recommended, all[/red]")
+    if model_set not in NAMED_MODEL_SETS:
+        choices = ", ".join(PREFETCH_SET_CHOICES)
+        console.print(f"[red]Unknown set '{model_set}'. Choose from: {choices}[/red]")
         sys.exit(1)
 
-    key = key_map[model_set]
+    key = NAMED_MODEL_SETS[model_set]
     return [e for e in catalog.values() if is_local_ollama(e) and e.get(key)]
 
 
@@ -108,8 +109,8 @@ def main() -> None:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
         "--set", dest="model_set",
-        choices=["poc", "v1", "recommended", "all"],
-        metavar="{poc,v1,recommended,all}",
+        choices=list(PREFETCH_SET_CHOICES),
+        metavar=format_set_metavar(PREFETCH_SET_CHOICES),
         help="Named model set to prefetch",
     )
     group.add_argument(

@@ -58,6 +58,10 @@ uv run benchmark list
 uv run prefetch --set recommended --dry-run   # preview downloads
 uv run prefetch --set recommended             # actually pull
 
+# Optional: focused Qwen coding comparison batch
+uv run prefetch --set qwen-coding --dry-run
+uv run benchmark run --set qwen-coding
+
 # 4. Smallest possible sanity run (~30s)
 uv run benchmark run --set poc
 
@@ -186,7 +190,7 @@ Nothing else. No Docker, no cloud, no sign-up.
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--set {poc,v1,recommended,local,reference}` | — | Named model set. `local` = whatever is already in your Ollama store; `reference` = Anthropic cloud. Mutually exclusive with `--model`. |
+| `--set {poc,v1,recommended,qwen-coding,local,reference}` | — | Named model set. `qwen-coding` is the focused comparison batch: `gemma4:e4b`, `qwen3.5:35b-a3b-coding-mxfp8`, and `qwen3.6:35b-a3b-coding-mxfp8`; `local` = whatever is already in your Ollama store; `reference` = Anthropic cloud. Mutually exclusive with `--model`. |
 | `--model MODEL_ID […]` | — | One or more explicit model IDs. Unknown IDs are treated as Ollama models. |
 | `--task NAME` | `limerick` | Task file name (without `.md`) in `tasks/`. |
 | `--timeout SECONDS` | 900 | Per-model hard limit. |
@@ -207,7 +211,7 @@ uv run benchmark report --job-id <id> --output reports/mine.md
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--set {poc,v1,recommended,all}` | — | Named model set. |
+| `--set {poc,v1,recommended,qwen-coding,all}` | — | Named model set. |
 | `--model MODEL_ID […]` | — | Specific model IDs to pull. |
 | `--dry-run` | off | Show the plan without downloading. |
 | `--yes`, `-y` | off | Skip the confirmation prompt. |

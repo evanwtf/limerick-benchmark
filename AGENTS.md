@@ -57,7 +57,7 @@ directly** — do not create per-agent variants.
 `prefetch.py` is a separate CLI (exposed as the `prefetch` project script) for
 pulling Ollama models. Benchmark inputs live in `tasks/` (Markdown files,
 currently only `limerick.md`) and `models.yaml` (the model catalog with
-`poc` / `v1` / `recommended` / `exclude` flags). `reports/` contains the
+`poc` / `v1` / `recommended` / `qwen_coding` / `exclude` flags). `reports/` contains the
 automatically generated Markdown reports for each job. `tests/` mirrors the
 `benchmark/` modules one-for-one.
 
@@ -82,6 +82,8 @@ Use `uv` for all Python workflows — never call `pip`/`python` directly.
 - `uv sync`: Install dependencies from `pyproject.toml` / `uv.lock`.
 - `uv run benchmark list`: Show locally-pulled Ollama models vs. the catalog.
 - `uv run benchmark run --set poc`: Smallest proof-of-concept run.
+- `uv run benchmark run --set qwen-coding`: Focused comparison batch for
+  `gemma4:e4b` plus the Qwen 3.5 and 3.6 coding models.
 - `uv run benchmark run --set recommended --skip-missing`: Full run, skipping
   models that aren't pulled.
 - `uv run benchmark run --set local`: Run everything currently in the local
@@ -103,6 +105,8 @@ Use `uv` for all Python workflows — never call `pip`/`python` directly.
   Markdown report for a specific job id. Reports are automatically written
   to `reports/results_<job_id>.md` at the end of every `run`.
 - `uv run prefetch --set recommended --dry-run`: Preview required downloads.
+- `uv run prefetch --set qwen-coding --dry-run`: Preview downloads for the
+  focused Qwen coding comparison batch.
 - `uv run prefetch --model gemma4:e2b qwen3.5:9b`: Pull specific models.
 - `uv run python -m unittest discover tests`: Run the test suite.
 
