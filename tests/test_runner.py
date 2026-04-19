@@ -1,4 +1,5 @@
 import json
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,6 +9,8 @@ from benchmark.runner import (
     RUN_ORDER_CHOICES,
     RESULTS_ROOT,
     _build_run_plan,
+    _collect_trace_signals,
+    _collect_workspace_artifact_signals,
     _first_meaningful_edit_seconds,
     _new_job_id,
     _normalize_agent_stats_for_eval,
@@ -18,6 +21,7 @@ from benchmark.runner import (
     _should_evaluate,
     _slug,
     _task_prompt_with_workspace_note,
+    _workspace_file_snapshot,
     run_benchmark,
 )
 
@@ -201,6 +205,70 @@ class RunnerTimingTests(unittest.TestCase):
             edit_seconds = _first_meaningful_edit_seconds(workspace, started_ns)
 
         self.assertEqual(edit_seconds, 0.0)
+
+    def test_collect_trace_signals_counts_behavior_markers(self) -> None:
+        with TemporaryDirectory() as tmp:
+            trace_path = Path(tmp) / "trace.jsonl"
+            entries = [
+                {"type": "agent_start"},
+                {"type": "assistant", "content": "I'll verify the route, then fix the refresh tag."},
+                {"type": "aider_log", "content": "Model output did not conform to the edit format."},
+                {"type": "aider_log", "content": "Model output did not conform to the edit format."},
+                {"type": "assistant", "content": "I'll verify the route, then fix the refresh tag."},
+            ]
+            trace_path.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+
+            signals = _collect_trace_signals(trace_path)
+
+        self.assertEqual(signals["trace_line_count"], 5)
+        self.assertEqual(signals["assistant_answer_count"], 2)
+        self.assertEqual(signals["verification_marker_count"], 2)
+        self.assertEqual(signals["self_correction_marker_count"], 2)
+        self.assertEqual(signals["format_fixation_marker_count"], 2)
+        self.assertEqual(signals["duplicate_output_attempt_count"], 2)
+
+    def test_collect_workspace_artifact_signals_summarizes_app_shape(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            pyproject = workspace / "pyproject.toml"
+            pyproject.write_text(
+                "[project]\n"
+                "name='demo'\n"
+                "version='0.1.0'\n"
+                "dependencies=['flask>=3.0', 'jinja2>=3.1']\n"
+            )
+            readme = workspace / "README.md"
+            readme.write_text("before\n")
+            initial_snapshot = _workspace_file_snapshot(workspace)
+            started_ns = readme.stat().st_mtime_ns + 1_000_000
+
+            app_path = workspace / "app.py"
+            app_path.write_text(
+                "from flask import Flask, render_template_string\n"
+                "app = Flask(__name__)\n"
+                "@app.route('/')\n"
+                "def home():\n"
+                "    return render_template_string('<html><body><pre>Hello</pre></body></html>')\n"
+                "@app.route('/health')\n"
+                "def health():\n"
+                "    return 'ok'\n"
+            )
+            readme.write_text("after\n")
+            updated_ns = started_ns + 5_000_000
+            os.utime(readme, ns=(updated_ns, updated_ns))
+
+            signals = _collect_workspace_artifact_signals(workspace, initial_snapshot, started_ns)
+
+        self.assertEqual(signals["workspace_file_count"], 3)
+        self.assertEqual(signals["files_created_count"], 1)
+        self.assertEqual(signals["files_modified_count"], 1)
+        self.assertEqual(signals["dependency_count"], 2)
+        self.assertIsNotNone(signals["app_py_sha256"])
+        self.assertGreater(signals["app_py_bytes"], 0)
+        self.assertEqual(signals["app_py_loc"], 8)
+        self.assertTrue(signals["uses_render_template_string"])
+        self.assertTrue(signals["uses_inline_html"])
+        self.assertEqual(signals["route_count"], 2)
 
 
 class RunnerPropagationTests(unittest.IsolatedAsyncioTestCase):
@@ -457,3 +525,99 @@ class RunnerSummaryTimingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(summary["eval_finished_at"])
         self.assertIsNone(summary["startup_seconds"])
         self.assertFalse(summary["passed"])
+
+
+class RunnerSummarySignalTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_one_writes_trace_and_artifact_signals_to_summary(self) -> None:
+        model = {"id": "gemma4:e2b", "provider": "ollama"}
+        with TemporaryDirectory() as tmp:
+            results_root = Path(tmp) / "results"
+            workspace_base = Path(tmp) / "workspaces"
+            collector = mock.Mock()
+
+            async def fake_run_agent(*args, **kwargs):
+                workspace = kwargs["workspace"]
+                trace_path = kwargs["trace_path"]
+                (workspace / "pyproject.toml").write_text(
+                    "[project]\n"
+                    "name='demo'\n"
+                    "version='0.1.0'\n"
+                    "dependencies=['flask>=3.0']\n"
+                )
+                (workspace / "app.py").write_text(
+                    "from flask import Flask, render_template_string\n"
+                    "app = Flask(__name__)\n"
+                    "@app.route('/')\n"
+                    "def home():\n"
+                    "    return render_template_string('<html><body><pre>Hello</pre></body></html>')\n"
+                )
+                trace_entries = [
+                    {"type": "agent_start"},
+                    {"type": "assistant", "content": "I'll verify this, then fix it."},
+                    {"type": "aider_log", "content": "Model output did not conform to the edit format."},
+                    {"type": "assistant", "content": "I'll verify this, then fix it."},
+                ]
+                trace_path.write_text("".join(json.dumps(entry) + "\n" for entry in trace_entries))
+                return {
+                    "finish_reason": "completed",
+                    "timed_out": False,
+                    "error": None,
+                    "agent_stop": None,
+                }
+
+            eval_result = {
+                "entry_point": "uv run python app.py",
+                "entry_point_candidates": ["uv run python app.py"],
+                "entry_point_mismatch": False,
+                "server_started": True,
+                "http_status": 200,
+                "response_bytes": 123,
+                "body_has_refresh_mechanism": True,
+                "body_has_limerick_shape": True,
+                "startup_seconds": 1.2,
+                "passed": True,
+                "error": None,
+            }
+
+            with (
+                mock.patch("benchmark.runner.RESULTS_ROOT", results_root),
+                mock.patch("benchmark.runner.WORKSPACE_BASE", workspace_base),
+                mock.patch("benchmark.runner.MetricsCollector", return_value=collector),
+                mock.patch("benchmark.runner.run_agent", side_effect=fake_run_agent),
+                mock.patch("benchmark.runner.evaluate", new=mock.AsyncMock(return_value=eval_result)),
+                mock.patch(
+                    "benchmark.runner.time.monotonic",
+                    side_effect=[10.0, 11.0, 11.0, 12.0, 12.0],
+                ),
+            ):
+                summary = await _run_one(
+                    model,
+                    "Build the app.",
+                    timeout=900,
+                    aider_stagnation_timeout=420,
+                    enable_hardware_metrics=False,
+                    job_id="20260417.083818",
+                    run_index=1,
+                    total_runs=1,
+                    round_index=1,
+                    position_in_round=1,
+                    total_rounds=1,
+                    run_dir_name="gemma4_e2b",
+                    agent_type="react",
+                    run_label="1/1:gemma4-e2b:react",
+                    task_name="limerick",
+                )
+
+        self.assertEqual(summary["trace_line_count"], 4)
+        self.assertEqual(summary["assistant_answer_count"], 2)
+        self.assertEqual(summary["verification_marker_count"], 2)
+        self.assertEqual(summary["self_correction_marker_count"], 2)
+        self.assertEqual(summary["format_fixation_marker_count"], 1)
+        self.assertEqual(summary["duplicate_output_attempt_count"], 1)
+        self.assertEqual(summary["files_created_count"], 2)
+        self.assertEqual(summary["files_modified_count"], 0)
+        self.assertEqual(summary["dependency_count"], 1)
+        self.assertTrue(summary["uses_render_template_string"])
+        self.assertTrue(summary["uses_inline_html"])
+        self.assertEqual(summary["route_count"], 1)
+        self.assertIsNotNone(summary["app_py_sha256"])

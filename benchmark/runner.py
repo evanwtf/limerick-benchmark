@@ -1,12 +1,14 @@
 """Orchestrates benchmark runs serially across a list of models."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import random
 import re
 import subprocess
 import time
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,29 @@ WORKSPACE_BASE = Path.home() / ".limerick-benchmark" / "workspaces"
 RUN_ORDER_CHOICES = ("balanced", "random", "fixed")
 _WORKSPACE_IGNORE_DIR_NAMES = {".venv", ".git", "__pycache__", "node_modules"}
 _WORKSPACE_IGNORE_PREFIXES = (".aider.",)
+_SELF_CORRECTION_PATTERNS = (
+    re.compile(r"\bfix(?:ed|ing)?\b", re.IGNORECASE),
+    re.compile(r"\bmistake\b", re.IGNORECASE),
+    re.compile(r"\bforgot\b", re.IGNORECASE),
+    re.compile(r"\bcorrection\b", re.IGNORECASE),
+    re.compile(r"\bretry(?:ing)?\b", re.IGNORECASE),
+)
+_VERIFICATION_PATTERNS = (
+    re.compile(r"\bverify(?:ing|ied)?\b", re.IGNORECASE),
+    re.compile(r"\bdouble-check(?:ing)?\b", re.IGNORECASE),
+    re.compile(r"\bcheck(?:ing)?\b", re.IGNORECASE),
+    re.compile(r"\bconfirm(?:ing|ed)?\b", re.IGNORECASE),
+    re.compile(r"\btest(?:ed|ing)?\b", re.IGNORECASE),
+)
+_FORMAT_FIXATION_PATTERNS = (
+    re.compile(r"edit format", re.IGNORECASE),
+    re.compile(r"whole edit format", re.IGNORECASE),
+    re.compile(r"edit-errors\.html", re.IGNORECASE),
+    re.compile(r"no filename provided before", re.IGNORECASE),
+    re.compile(r"\breflections allowed\b", re.IGNORECASE),
+)
+_INLINE_HTML_RE = re.compile(r"<(?:html|body|head|meta|script|style|pre|div|p)\b", re.IGNORECASE)
+_ROUTE_DECORATOR_RE = re.compile(r"@\w+\.route\(", re.IGNORECASE)
 
 
 def _slug(model_id: str) -> str:
@@ -103,6 +128,156 @@ def _first_meaningful_edit_seconds(workspace: Path, started_epoch_ns: int) -> fl
     if first_edit_ns is None:
         return None
     return _round_seconds(max(0.0, (first_edit_ns - started_epoch_ns) / 1_000_000_000))
+
+
+def _workspace_file_snapshot(workspace: Path) -> set[str]:
+    snapshot: set[str] = set()
+    if not workspace.exists():
+        return snapshot
+
+    for path in workspace.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            rel = path.relative_to(workspace)
+        except ValueError:
+            continue
+        if any(part in _WORKSPACE_IGNORE_DIR_NAMES for part in rel.parts):
+            continue
+        if any(part.startswith(_WORKSPACE_IGNORE_PREFIXES) for part in rel.parts):
+            continue
+        snapshot.add(rel.as_posix())
+    return snapshot
+
+
+def _count_pattern_matches(patterns: tuple[re.Pattern[str], ...], texts: list[str]) -> int:
+    return sum(len(pattern.findall(text)) for pattern in patterns for text in texts)
+
+
+def _trace_texts(trace_path: Path) -> tuple[int, int, list[str]]:
+    line_count = 0
+    assistant_answer_count = 0
+    texts: list[str] = []
+
+    if not trace_path.exists():
+        return line_count, assistant_answer_count, texts
+
+    with trace_path.open() as f:
+        for line in f:
+            line_count += 1
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            event_type = entry.get("type")
+            if event_type == "assistant":
+                content = entry.get("content")
+                if isinstance(content, str) and content.strip():
+                    assistant_answer_count += 1
+                    texts.append(content)
+            elif event_type == "aider_log":
+                content = entry.get("content")
+                if isinstance(content, str) and content.strip():
+                    texts.append(content)
+
+    return line_count, assistant_answer_count, texts
+
+
+def _collect_trace_signals(trace_path: Path) -> dict[str, Any]:
+    line_count, assistant_answer_count, texts = _trace_texts(trace_path)
+    duplicate_output_attempt_count = 0
+    seen_texts: set[str] = set()
+    for text in texts:
+        normalized = " ".join(text.lower().split())
+        if not normalized:
+            continue
+        if normalized in seen_texts:
+            duplicate_output_attempt_count += 1
+        else:
+            seen_texts.add(normalized)
+
+    return {
+        "trace_line_count": line_count,
+        "assistant_answer_count": assistant_answer_count,
+        "self_correction_marker_count": _count_pattern_matches(_SELF_CORRECTION_PATTERNS, texts),
+        "verification_marker_count": _count_pattern_matches(_VERIFICATION_PATTERNS, texts),
+        "format_fixation_marker_count": _count_pattern_matches(_FORMAT_FIXATION_PATTERNS, texts),
+        "duplicate_output_attempt_count": duplicate_output_attempt_count,
+    }
+
+
+def _dependency_count(workspace: Path) -> int:
+    pyproject = workspace / "pyproject.toml"
+    if not pyproject.exists():
+        return 0
+    try:
+        data = tomllib.loads(pyproject.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return 0
+    dependencies = data.get("project", {}).get("dependencies", [])
+    if not isinstance(dependencies, list):
+        return 0
+    return sum(1 for dep in dependencies if isinstance(dep, str) and dep.strip())
+
+
+def _app_py_signals(workspace: Path) -> dict[str, Any]:
+    app_path = workspace / "app.py"
+    if not app_path.exists():
+        return {
+            "app_py_sha256": None,
+            "app_py_bytes": None,
+            "app_py_loc": None,
+            "uses_render_template_string": False,
+            "uses_inline_html": False,
+            "route_count": 0,
+        }
+
+    try:
+        content = app_path.read_bytes()
+    except OSError:
+        return {
+            "app_py_sha256": None,
+            "app_py_bytes": None,
+            "app_py_loc": None,
+            "uses_render_template_string": False,
+            "uses_inline_html": False,
+            "route_count": 0,
+        }
+
+    text = content.decode("utf-8", errors="replace")
+    return {
+        "app_py_sha256": hashlib.sha256(content).hexdigest(),
+        "app_py_bytes": len(content),
+        "app_py_loc": sum(1 for line in text.splitlines() if line.strip()),
+        "uses_render_template_string": "render_template_string(" in text,
+        "uses_inline_html": bool(_INLINE_HTML_RE.search(text)),
+        "route_count": len(_ROUTE_DECORATOR_RE.findall(text)),
+    }
+
+
+def _collect_workspace_artifact_signals(
+    workspace: Path,
+    initial_snapshot: set[str],
+    started_epoch_ns: int,
+) -> dict[str, Any]:
+    current_snapshot = _workspace_file_snapshot(workspace)
+    modified_existing_count = 0
+    for rel_path in current_snapshot & initial_snapshot:
+        path = workspace / rel_path
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            continue
+        if mtime_ns >= started_epoch_ns:
+            modified_existing_count += 1
+
+    return {
+        "workspace_file_count": len(current_snapshot),
+        "files_created_count": len(current_snapshot - initial_snapshot),
+        "files_modified_count": modified_existing_count,
+        "dependency_count": _dependency_count(workspace),
+        **_app_py_signals(workspace),
+    }
 
 
 def _ordered_models_for_round(
@@ -361,6 +536,7 @@ async def _run_one(
     workspace = WORKSPACE_BASE / job_id / run_dir_name
     workspace.mkdir(parents=True)
     _prepare_workspace(workspace, task_name=task_name, agent_type=agent_type)
+    initial_workspace_snapshot = _workspace_file_snapshot(workspace)
 
     # Symlink for convenience so results dir is self-contained for browsing
     (run_dir / "workspace").symlink_to(workspace)
@@ -450,6 +626,12 @@ async def _run_one(
     collector.stop()
 
     normalized_agent_stats = _normalize_agent_stats_for_eval(agent_stats, eval_result)
+    trace_signals = _collect_trace_signals(run_dir / "trace.jsonl")
+    artifact_signals = _collect_workspace_artifact_signals(
+        workspace,
+        initial_workspace_snapshot,
+        run_started_epoch_ns,
+    )
 
     summary = {
         "model_id": model_id,
@@ -472,6 +654,8 @@ async def _run_one(
         "startup_seconds": eval_result.get("startup_seconds"),
         "timeout_seconds": timeout,
         "aider_stagnation_timeout_seconds": aider_stagnation_timeout,
+        **trace_signals,
+        **artifact_signals,
         **token_state,
         **normalized_agent_stats,
         "eval": eval_result,
