@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from statistics import median
+from statistics import median, pstdev
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -154,16 +155,17 @@ def generate_markdown_report(
     if repeated_job:
         lines.extend(
             [
-                "| # | Model | Runs | Passes | Median | Fastest | Slowest |",
-                "|---|---|---|---|---|---|---|",
+                "| # | Model | Runs | Passes | Median | Stddev | P90 | App Hashes | Shapes |",
+                "|---|---|---|---|---|---|---|---|---|",
             ]
         )
         for index, (model_id, runs) in enumerate(grouped_models, start=1):
             lines.append(
                 "| "
                 f"{index} | {model_id} | {len(runs)} | {_count_passes(runs)}/{len(runs)} | "
-                f"{_format_seconds(_median_wall_time(runs))} | {_format_seconds(_fastest_pass_time(runs))} | "
-                f"{_format_seconds(_slowest_pass_time(runs))} |"
+                f"{_format_seconds(_median_wall_time(runs))} | {_format_seconds(_wall_time_stddev(runs))} | "
+                f"{_format_seconds(_wall_time_p90(runs))} | {_distinct_app_hash_count(runs)} | "
+                f"{_distinct_solution_shape_count(runs)} |"
             )
     else:
         lines.extend(
@@ -181,6 +183,9 @@ def generate_markdown_report(
                 f"{summary.get('finish_reason') or '-'} | {eval_result.get('http_status') or '-'} | "
                 f"{eval_result.get('error') or '-'} |"
             )
+
+    if repeated_job:
+        lines.extend(_render_order_effects(report.models))
 
     finish_reasons = Counter((model.summary.get("finish_reason") or "unknown") for model in report.models)
     eval_errors = Counter(
@@ -451,11 +456,31 @@ def _render_group_section(
         ("Runs", str(total_runs)),
         ("Passes", f"{pass_count}/{total_runs} ({_format_percent(pass_count, total_runs)})"),
         ("Median wall time", _format_seconds(_median_wall_time(runs))),
+        ("Wall time stddev", _format_seconds(_wall_time_stddev(runs))),
+        ("Wall time p90", _format_seconds(_wall_time_p90(runs))),
         ("Fastest pass", _format_seconds(_fastest_pass_time(runs))),
         ("Slowest pass", _format_seconds(_slowest_pass_time(runs))),
+        ("Distinct app hashes", str(_distinct_app_hash_count(runs))),
+        ("Distinct solution shapes", str(_distinct_solution_shape_count(runs))),
         ("Finish reasons", _format_counter_summary(finish_reasons)),
         ("Evaluator outcomes", _format_counter_summary(eval_errors)),
     ]
+
+    agent_times = _numeric_summary_values(runs, "agent_seconds")
+    if agent_times:
+        rows.append(("Median agent time", _format_seconds(_median(agent_times))))
+
+    eval_times = _numeric_summary_values(runs, "eval_seconds")
+    if eval_times:
+        rows.append(("Median eval time", _format_seconds(_median(eval_times))))
+
+    startup_times = _numeric_summary_values(runs, "startup_seconds")
+    if startup_times:
+        rows.append(("Median startup time", _format_seconds(_median(startup_times))))
+
+    first_edit_times = _numeric_summary_values(runs, "first_edit_seconds")
+    if first_edit_times:
+        rows.append(("Median first edit", _format_seconds(_median(first_edit_times))))
 
     sample_counts = [run.metrics.sample_count for run in runs if run.metrics is not None]
     if sample_counts:
@@ -679,13 +704,39 @@ def _median(values: list[float]) -> float | None:
     return float(median(values))
 
 
+def _stddev(values: list[float]) -> float | None:
+    if len(values) < 2:
+        return None
+    return float(pstdev(values))
+
+
+def _p90(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = max(0, math.ceil(len(ordered) * 0.9) - 1)
+    return float(ordered[index])
+
+
+def _numeric_summary_values(runs: list[ModelReport], key: str) -> list[float]:
+    values: list[float] = []
+    for run in runs:
+        value = run.summary.get(key)
+        if isinstance(value, (int, float)):
+            values.append(float(value))
+    return values
+
+
 def _median_wall_time(runs: list[ModelReport]) -> float | None:
-    values = [
-        float(run.summary["wall_seconds"])
-        for run in runs
-        if isinstance(run.summary.get("wall_seconds"), (int, float))
-    ]
-    return _median(values)
+    return _median(_numeric_summary_values(runs, "wall_seconds"))
+
+
+def _wall_time_stddev(runs: list[ModelReport]) -> float | None:
+    return _stddev(_numeric_summary_values(runs, "wall_seconds"))
+
+
+def _wall_time_p90(runs: list[ModelReport]) -> float | None:
+    return _p90(_numeric_summary_values(runs, "wall_seconds"))
 
 
 def _fastest_pass_time(runs: list[ModelReport]) -> float | None:
@@ -712,6 +763,67 @@ def _slowest_pass_time(runs: list[ModelReport]) -> float | None:
 
 def _count_passes(runs: list[ModelReport]) -> int:
     return sum(1 for run in runs if _is_pass(run.summary))
+
+
+def _distinct_app_hash_count(runs: list[ModelReport]) -> int:
+    return len(
+        {
+            str(run.summary["app_py_sha256"])
+            for run in runs
+            if run.summary.get("app_py_sha256")
+        }
+    )
+
+
+def _solution_shape_key(summary: dict[str, Any]) -> tuple[Any, ...] | None:
+    fields = (
+        summary.get("uses_render_template_string"),
+        summary.get("uses_inline_html"),
+        summary.get("route_count"),
+        summary.get("dependency_count"),
+    )
+    if all(value is None for value in fields):
+        return None
+    return fields
+
+
+def _distinct_solution_shape_count(runs: list[ModelReport]) -> int:
+    return len(
+        {
+            shape
+            for run in runs
+            if (shape := _solution_shape_key(run.summary)) is not None
+        }
+    )
+
+
+def _render_order_effects(models: list[ModelReport]) -> list[str]:
+    by_position: dict[int, list[ModelReport]] = {}
+    for model in models:
+        position = model.summary.get("position_in_round")
+        if not isinstance(position, int):
+            continue
+        by_position.setdefault(position, []).append(model)
+
+    if not by_position:
+        return []
+
+    lines = [
+        "",
+        "## Order Effects",
+        "",
+        "| Position | Runs | Pass Rate | Median Wall Time |",
+        "|---|---|---|---|",
+    ]
+    for position in sorted(by_position):
+        runs = by_position[position]
+        pass_count = _count_passes(runs)
+        lines.append(
+            "| "
+            f"{position} | {len(runs)} | {_format_percent(pass_count, len(runs))} | "
+            f"{_format_seconds(_median_wall_time(runs))} |"
+        )
+    return lines
 
 
 def _format_median_int(values: list[int]) -> str:

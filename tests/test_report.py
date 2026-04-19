@@ -36,6 +36,15 @@ class ReportGenerationTests(unittest.TestCase):
                     "position_in_round": 1,
                     "started_at": "2026-04-19T01:02:03+00:00",
                     "wall_seconds": 18.0,
+                    "agent_seconds": 16.0,
+                    "eval_seconds": 2.0,
+                    "startup_seconds": 1.2,
+                    "first_edit_seconds": 4.0,
+                    "app_py_sha256": "hash-gemma-a",
+                    "uses_render_template_string": True,
+                    "uses_inline_html": True,
+                    "route_count": 1,
+                    "dependency_count": 1,
                     "tokens_in": 1000,
                     "tokens_out": 700,
                     "api_calls": None,
@@ -63,6 +72,15 @@ class ReportGenerationTests(unittest.TestCase):
                     "position_in_round": 2,
                     "started_at": "2026-04-19T01:02:23+00:00",
                     "wall_seconds": 16.0,
+                    "agent_seconds": 14.5,
+                    "eval_seconds": 1.5,
+                    "startup_seconds": 1.0,
+                    "first_edit_seconds": 3.0,
+                    "app_py_sha256": "hash-qwen-a",
+                    "uses_render_template_string": False,
+                    "uses_inline_html": True,
+                    "route_count": 2,
+                    "dependency_count": 1,
                     "tokens_in": 1000,
                     "tokens_out": 600,
                     "api_calls": None,
@@ -90,6 +108,15 @@ class ReportGenerationTests(unittest.TestCase):
                     "position_in_round": 1,
                     "started_at": "2026-04-19T01:02:43+00:00",
                     "wall_seconds": 17.0,
+                    "agent_seconds": 15.2,
+                    "eval_seconds": 1.8,
+                    "startup_seconds": 1.1,
+                    "first_edit_seconds": 2.5,
+                    "app_py_sha256": "hash-qwen-b",
+                    "uses_render_template_string": True,
+                    "uses_inline_html": True,
+                    "route_count": 2,
+                    "dependency_count": 2,
                     "tokens_in": 1000,
                     "tokens_out": 610,
                     "api_calls": None,
@@ -117,6 +144,15 @@ class ReportGenerationTests(unittest.TestCase):
                     "position_in_round": 2,
                     "started_at": "2026-04-19T01:03:03+00:00",
                     "wall_seconds": 19.0,
+                    "agent_seconds": 16.8,
+                    "eval_seconds": 2.2,
+                    "startup_seconds": 1.4,
+                    "first_edit_seconds": 4.5,
+                    "app_py_sha256": "hash-gemma-a",
+                    "uses_render_template_string": True,
+                    "uses_inline_html": True,
+                    "route_count": 1,
+                    "dependency_count": 1,
                     "tokens_in": 1000,
                     "tokens_out": 710,
                     "api_calls": None,
@@ -143,9 +179,19 @@ class ReportGenerationTests(unittest.TestCase):
         self.assertIn("**Order:** balanced", markdown)
         self.assertIn("| Runs | 2 |", markdown)
         self.assertIn("| Passes | 2/2 (100%) |", markdown)
+        self.assertIn("| Wall time stddev | 0.5 s |", markdown)
+        self.assertIn("| Wall time p90 | 19.0 s |", markdown)
+        self.assertIn("| Distinct app hashes | 1 |", markdown)
+        self.assertIn("| Distinct solution shapes | 1 |", markdown)
+        self.assertIn("| Median agent time | 16.4 s |", markdown)
+        self.assertIn("| Median startup time | 1.3 s |", markdown)
         self.assertIn("| Run | Round | Pos | Result | Wall Time | Finish | HTTP | Eval |", markdown)
-        self.assertIn("| 1 | gemma4:e4b | 2 | 2/2 | 18.5 s | 18.0 s | 19.0 s |", markdown)
-        self.assertIn("| 2 | qwen3.5:35b-a3b-coding-mxfp8 | 2 | 2/2 | 16.5 s | 16.0 s | 17.0 s |", markdown)
+        self.assertIn("| 1 | gemma4:e4b | 2 | 2/2 | 18.5 s | 0.5 s | 19.0 s | 1 | 1 |", markdown)
+        self.assertIn("| 2 | qwen3.5:35b-a3b-coding-mxfp8 | 2 | 2/2 | 16.5 s | 0.5 s | 17.0 s | 2 | 2 |", markdown)
+        self.assertIn("## Order Effects", markdown)
+        self.assertIn("| Position | Runs | Pass Rate | Median Wall Time |", markdown)
+        self.assertIn("| 1 | 2 | 100% | 17.5 s |", markdown)
+        self.assertIn("| 2 | 2 | 100% | 17.5 s |", markdown)
 
     def test_generate_markdown_report_with_mixed_results(self) -> None:
         with TemporaryDirectory() as tmp:
