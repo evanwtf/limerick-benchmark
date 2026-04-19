@@ -8,6 +8,7 @@ from benchmark.runner import (
     RUN_ORDER_CHOICES,
     RESULTS_ROOT,
     _build_run_plan,
+    _first_meaningful_edit_seconds,
     _new_job_id,
     _normalize_agent_stats_for_eval,
     _prepare_workspace,
@@ -185,6 +186,23 @@ class RunnerPlanTests(unittest.TestCase):
         plan = _build_run_plan([{"id": "gemma4:e4b"}], rounds=1, order="balanced", seed=None)
         self.assertEqual(plan[0]["run_dir_name"], "gemma4_e4b")
 
+
+class RunnerTimingTests(unittest.TestCase):
+    def test_first_meaningful_edit_ignores_cache_directories(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            cache_dir = workspace / ".venv"
+            cache_dir.mkdir()
+            (cache_dir / "ignored.txt").write_text("ignore\n")
+            app_path = workspace / "app.py"
+            app_path.write_text("print('ok')\n")
+            started_ns = app_path.stat().st_mtime_ns - 1_000_000
+
+            edit_seconds = _first_meaningful_edit_seconds(workspace, started_ns)
+
+        self.assertEqual(edit_seconds, 0.0)
+
+
 class RunnerPropagationTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_benchmark_passes_aider_stagnation_timeout_to_each_run(self) -> None:
         model = {"id": "qwen3.5:9b", "provider": "ollama"}
@@ -299,3 +317,143 @@ class RunnerPortGuardTests(unittest.IsolatedAsyncioTestCase):
 
         assert_mock.assert_called_once()
         run_agent_mock.assert_not_called()
+
+
+class RunnerSummaryTimingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_one_records_timing_breakdown_and_lifecycle_fields(self) -> None:
+        model = {"id": "gemma4:e2b", "provider": "ollama"}
+        with TemporaryDirectory() as tmp:
+            results_root = Path(tmp) / "results"
+            workspace_base = Path(tmp) / "workspaces"
+            collector = mock.Mock()
+
+            async def fake_run_agent(*args, **kwargs):
+                workspace = kwargs["workspace"]
+                (workspace / "app.py").write_text("print('ok')\n")
+                return {
+                    "finish_reason": "completed",
+                    "timed_out": False,
+                    "error": None,
+                    "agent_stop": None,
+                }
+
+            eval_result = {
+                "entry_point": "uv run python app.py",
+                "entry_point_candidates": ["uv run python app.py"],
+                "entry_point_mismatch": False,
+                "server_started": True,
+                "http_status": 200,
+                "response_bytes": 123,
+                "body_has_refresh_mechanism": True,
+                "body_has_limerick_shape": True,
+                "startup_seconds": 2.7,
+                "passed": True,
+                "error": None,
+            }
+
+            with (
+                mock.patch("benchmark.runner.RESULTS_ROOT", results_root),
+                mock.patch("benchmark.runner.WORKSPACE_BASE", workspace_base),
+                mock.patch("benchmark.runner.MetricsCollector", return_value=collector),
+                mock.patch("benchmark.runner.run_agent", side_effect=fake_run_agent),
+                mock.patch("benchmark.runner.evaluate", new=mock.AsyncMock(return_value=eval_result)),
+                mock.patch(
+                    "benchmark.runner.time.monotonic",
+                    side_effect=[100.0, 112.4, 112.4, 115.1, 115.1],
+                ),
+            ):
+                summary = await _run_one(
+                    model,
+                    "Build the app.",
+                    timeout=900,
+                    aider_stagnation_timeout=420,
+                    enable_hardware_metrics=False,
+                    job_id="20260417.083818",
+                    run_index=1,
+                    total_runs=1,
+                    round_index=1,
+                    position_in_round=1,
+                    total_rounds=1,
+                    run_dir_name="gemma4_e2b",
+                    agent_type="react",
+                    run_label="1/1:gemma4-e2b:react",
+                    task_name="limerick",
+                )
+
+            saved_summary = json.loads((results_root / "20260417.083818" / "gemma4_e2b" / "summary.json").read_text())
+
+        collector.start.assert_called_once()
+        collector.stop.assert_called_once()
+        self.assertEqual(summary["wall_seconds"], 15.1)
+        self.assertEqual(summary["agent_seconds"], 12.4)
+        self.assertEqual(summary["eval_seconds"], 2.7)
+        self.assertEqual(summary["startup_seconds"], 2.7)
+        self.assertIsInstance(summary["first_edit_seconds"], float)
+        self.assertGreaterEqual(summary["first_edit_seconds"], 0.0)
+        self.assertIsNotNone(summary["started_at"])
+        self.assertIsNotNone(summary["agent_finished_at"])
+        self.assertIsNotNone(summary["eval_started_at"])
+        self.assertIsNotNone(summary["eval_finished_at"])
+        self.assertIsNotNone(summary["finished_at"])
+        self.assertTrue(summary["passed"])
+        self.assertEqual(saved_summary["wall_seconds"], 15.1)
+        self.assertEqual(saved_summary["agent_seconds"], 12.4)
+        self.assertEqual(saved_summary["eval_seconds"], 2.7)
+        self.assertEqual(saved_summary["startup_seconds"], 2.7)
+
+    async def test_run_one_leaves_eval_timing_empty_when_evaluation_is_skipped(self) -> None:
+        model = {"id": "qwen3.5:9b", "provider": "ollama"}
+        with TemporaryDirectory() as tmp:
+            results_root = Path(tmp) / "results"
+            workspace_base = Path(tmp) / "workspaces"
+            collector = mock.Mock()
+            with (
+                mock.patch("benchmark.runner.RESULTS_ROOT", results_root),
+                mock.patch("benchmark.runner.WORKSPACE_BASE", workspace_base),
+                mock.patch("benchmark.runner.MetricsCollector", return_value=collector),
+                mock.patch(
+                    "benchmark.runner.run_agent",
+                    new=mock.AsyncMock(
+                        return_value={
+                            "finish_reason": "stuck_loop",
+                            "timed_out": False,
+                            "error": None,
+                            "agent_stop": {
+                                "category": "repeating_log_cycle",
+                                "detail": "repeating log cycle detected",
+                            },
+                        }
+                    ),
+                ),
+                mock.patch("benchmark.runner.evaluate", new=mock.AsyncMock()) as evaluate_mock,
+                mock.patch(
+                    "benchmark.runner.time.monotonic",
+                    side_effect=[200.0, 205.4, 205.4],
+                ),
+            ):
+                summary = await _run_one(
+                    model,
+                    "Build the app.",
+                    timeout=900,
+                    aider_stagnation_timeout=420,
+                    enable_hardware_metrics=False,
+                    job_id="20260417.083818",
+                    run_index=1,
+                    total_runs=1,
+                    round_index=1,
+                    position_in_round=1,
+                    total_rounds=1,
+                    run_dir_name="qwen3.5_9b",
+                    agent_type="react",
+                    run_label="1/1:qwen3.5-9b:react",
+                    task_name="limerick",
+                )
+
+        evaluate_mock.assert_not_awaited()
+        self.assertEqual(summary["wall_seconds"], 5.4)
+        self.assertEqual(summary["agent_seconds"], 5.4)
+        self.assertIsNone(summary["eval_seconds"])
+        self.assertIsNone(summary["eval_started_at"])
+        self.assertIsNone(summary["eval_finished_at"])
+        self.assertIsNone(summary["startup_seconds"])
+        self.assertFalse(summary["passed"])

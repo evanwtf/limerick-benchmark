@@ -8,6 +8,7 @@ import html
 import logging
 import re
 import stat
+import time
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,7 @@ def _empty_eval_result(
         "response_bytes": None,
         "body_has_refresh_mechanism": False,
         "body_has_limerick_shape": False,
+        "startup_seconds": None,
         "passed": False,
         "error": error,
     }
@@ -230,6 +232,7 @@ async def _try_entry_point(workspace: Path, entry_cmd: str) -> dict[str, Any]:
     )
 
     try:
+        startup_started = time.monotonic()
         up = await _wait_for_port(PORT, STARTUP_TIMEOUT)
         if not up:
             logger.warning("Server did not come up on port %d within %ds for '%s'", PORT, STARTUP_TIMEOUT, entry_cmd)
@@ -253,6 +256,7 @@ async def _try_entry_point(workspace: Path, entry_cmd: str) -> dict[str, Any]:
                     body = await resp.read()
                     result["http_status"] = resp.status
                     result["response_bytes"] = len(body)
+                    result["startup_seconds"] = round(time.monotonic() - startup_started, 1)
                     result.update(_classify_http_response(resp.status, body, workspace))
                     logger.info("GET / → %d (%d bytes)", resp.status, len(body))
             except Exception as exc:

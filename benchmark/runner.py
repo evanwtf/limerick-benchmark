@@ -26,6 +26,8 @@ TASKS_DIR = Path(__file__).parent.parent / "tasks"
 # and auto-register as a workspace member in our root pyproject.toml.
 WORKSPACE_BASE = Path.home() / ".limerick-benchmark" / "workspaces"
 RUN_ORDER_CHOICES = ("balanced", "random", "fixed")
+_WORKSPACE_IGNORE_DIR_NAMES = {".venv", ".git", "__pycache__", "node_modules"}
+_WORKSPACE_IGNORE_PREFIXES = (".aider.",)
 
 
 def _slug(model_id: str) -> str:
@@ -64,6 +66,43 @@ def _run_dir_name(
         f"{run_index:02d}_{model_slug}"
         f"__r{round_index:02d}_p{position_in_round:02d}"
     )
+
+
+def _round_seconds(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return round(value, 1)
+
+
+def _first_meaningful_edit_seconds(workspace: Path, started_epoch_ns: int) -> float | None:
+    """Return elapsed seconds until the first non-cache workspace file edit."""
+    first_edit_ns: int | None = None
+    if not workspace.exists():
+        return None
+
+    for path in workspace.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            rel = path.relative_to(workspace)
+        except ValueError:
+            continue
+        if any(part in _WORKSPACE_IGNORE_DIR_NAMES for part in rel.parts):
+            continue
+        if any(part.startswith(_WORKSPACE_IGNORE_PREFIXES) for part in rel.parts):
+            continue
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            continue
+        if mtime_ns < started_epoch_ns:
+            continue
+        if first_edit_ns is None or mtime_ns < first_edit_ns:
+            first_edit_ns = mtime_ns
+
+    if first_edit_ns is None:
+        return None
+    return _round_seconds(max(0.0, (first_edit_ns - started_epoch_ns) / 1_000_000_000))
 
 
 def _ordered_models_for_round(
@@ -354,7 +393,9 @@ async def _run_one(
     )
     collector.start(token_state)
 
-    wall_start = time.time()
+    started_at = datetime.now(timezone.utc).isoformat()
+    run_started_epoch_ns = time.time_ns()
+    run_started_monotonic = time.monotonic()
 
     agent_stats = await run_agent(
         model_id=model_id,
@@ -369,15 +410,27 @@ async def _run_one(
         run_label=run_label,
     )
 
-    wall_elapsed = round(time.time() - wall_start, 1)
-    collector.stop()
+    agent_finished_at = datetime.now(timezone.utc).isoformat()
+    agent_seconds = _round_seconds(time.monotonic() - run_started_monotonic)
+    first_edit_seconds = _first_meaningful_edit_seconds(workspace, run_started_epoch_ns)
 
+    eval_started_at: str | None = None
+    eval_finished_at: str | None = None
+    eval_seconds: float | None = None
     if _should_evaluate(agent_stats):
         assert_port_available(PORT, f"evaluating {model_id}")
-        logger.info("Agent done in %.1fs — evaluating…", wall_elapsed)
+        logger.info("Agent done in %.1fs — evaluating…", agent_seconds or 0.0)
+        eval_started_at = datetime.now(timezone.utc).isoformat()
+        eval_started_monotonic = time.monotonic()
         eval_result = await evaluate(workspace, run_dir)
+        eval_seconds = _round_seconds(time.monotonic() - eval_started_monotonic)
+        eval_finished_at = datetime.now(timezone.utc).isoformat()
     else:
-        logger.info("Agent done in %.1fs — skipping evaluation (%s)", wall_elapsed, agent_stats.get("finish_reason"))
+        logger.info(
+            "Agent done in %.1fs — skipping evaluation (%s)",
+            agent_seconds or 0.0,
+            agent_stats.get("finish_reason"),
+        )
         eval_result = {
             "entry_point": None,
             "entry_point_candidates": [],
@@ -387,9 +440,14 @@ async def _run_one(
             "response_bytes": None,
             "body_has_refresh_mechanism": False,
             "body_has_limerick_shape": False,
+            "startup_seconds": None,
             "passed": False,
             "error": "evaluation_skipped",
         }
+
+    finished_at = datetime.now(timezone.utc).isoformat()
+    wall_elapsed = _round_seconds(time.monotonic() - run_started_monotonic) or 0.0
+    collector.stop()
 
     normalized_agent_stats = _normalize_agent_stats_for_eval(agent_stats, eval_result)
 
@@ -397,13 +455,21 @@ async def _run_one(
         "model_id": model_id,
         "provider": provider,
         "run_dir": str(run_dir),
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": started_at,
+        "agent_finished_at": agent_finished_at,
+        "eval_started_at": eval_started_at,
+        "eval_finished_at": eval_finished_at,
+        "finished_at": finished_at,
         "run_index": run_index,
         "total_runs": total_runs,
         "round_index": round_index,
         "position_in_round": position_in_round,
         "total_rounds": total_rounds,
         "wall_seconds": wall_elapsed,
+        "agent_seconds": agent_seconds,
+        "eval_seconds": eval_seconds,
+        "first_edit_seconds": first_edit_seconds,
+        "startup_seconds": eval_result.get("startup_seconds"),
         "timeout_seconds": timeout,
         "aider_stagnation_timeout_seconds": aider_stagnation_timeout,
         **token_state,
@@ -426,6 +492,12 @@ def _print_summary(s: dict[str, Any]) -> None:
     logger.info("─" * 60)
     logger.info("  Model      : %s", s["model_id"])
     logger.info("  Wall time  : %.1fs", s["wall_seconds"])
+    if isinstance(s.get("agent_seconds"), (int, float)):
+        logger.info("  Agent time : %.1fs", s["agent_seconds"])
+    if isinstance(s.get("eval_seconds"), (int, float)):
+        logger.info("  Eval time  : %.1fs", s["eval_seconds"])
+    if isinstance(s.get("startup_seconds"), (int, float)):
+        logger.info("  Startup    : %.1fs", s["startup_seconds"])
     logger.info("  Tokens in  : %s", _format_counter(s.get("tokens_in")))
     logger.info("  Tokens out : %s", _format_counter(s.get("tokens_out")))
     logger.info("  API calls  : %s", _format_counter(s.get("api_calls")))

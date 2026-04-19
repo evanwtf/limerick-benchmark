@@ -198,3 +198,59 @@ class EvaluatorPolicyTests(unittest.IsolatedAsyncioTestCase):
 
         assert_mock.assert_called_once()
         create_proc_mock.assert_not_called()
+
+    async def test_try_entry_point_records_startup_seconds_after_http_response(self) -> None:
+        class FakeResponse:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def read(self) -> bytes:
+                return (
+                    b"<html><head><meta http-equiv='refresh' content='5'></head>"
+                    b"<body><pre>One\nTwo\nThree\nFour\nFive</pre></body></html>"
+                )
+
+        class FakeSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def get(self, *args, **kwargs):
+                return FakeResponse()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            proc = mock.Mock(pid=123, returncode=0)
+            with (
+                mock.patch("benchmark.evaluator.assert_port_available"),
+                mock.patch(
+                    "benchmark.evaluator.asyncio.create_subprocess_shell",
+                    new=mock.AsyncMock(return_value=proc),
+                ),
+                mock.patch(
+                    "benchmark.evaluator._wait_for_port",
+                    new=mock.AsyncMock(return_value=True),
+                ),
+                mock.patch(
+                    "benchmark.evaluator.listener_belongs_to_process_tree",
+                    return_value=True,
+                ),
+                mock.patch(
+                    "benchmark.evaluator.terminate_process_group",
+                    new=mock.AsyncMock(),
+                ),
+                mock.patch("benchmark.evaluator.aiohttp.ClientSession", return_value=FakeSession()),
+                mock.patch("benchmark.evaluator.time.monotonic", side_effect=[10.0, 12.6]),
+            ):
+                result = await _try_entry_point(workspace, "uv run python app.py")
+
+        self.assertEqual(result["http_status"], 200)
+        self.assertEqual(result["startup_seconds"], 2.6)
+        self.assertTrue(result["passed"])
